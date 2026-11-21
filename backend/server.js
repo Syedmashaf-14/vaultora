@@ -642,7 +642,10 @@ if (require('fs').existsSync(FRONTEND_DIST)) {
 }
 
 // Start Server and Connect DB
-db.connect().then(() => {
+const seedDefaultUsers = require('./seedData');
+
+db.connect().then(async () => {
+  await seedDefaultUsers();
   app.listen(PORT, () => {
     console.log(`Vaultora Secure Backend listening on port ${PORT}`);
     console.log(`Storage volume mounted at: ${path.resolve(__dirname, '..', 'vault')}`);

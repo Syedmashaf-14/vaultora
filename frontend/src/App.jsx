@@ -653,6 +653,40 @@ export default function App() {
 
           {/* Form */}
           <form onSubmit={authMode === 'login' ? handleLogin : handleRegister} className="space-y-4 text-xs">
+            {authMode === 'login' && (
+              <div className="mb-2">
+                <label className="block text-slate-400 font-semibold mb-1.5">Quick Demo Accounts (Password: Password123!)</label>
+                <div className="grid grid-cols-3 gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setAuthForm({ ...authForm, username: 'mashaf', password: 'Password123!' })}
+                    className="p-2 bg-blue-600/20 border border-blue-500/40 rounded-xl text-center hover:bg-blue-600/30 transition-colors cursor-pointer"
+                  >
+                    <div className="font-bold text-blue-300">Mashaf</div>
+                    <div className="text-[9px] text-blue-400">Admin</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setAuthForm({ ...authForm, username: 'ali', password: 'Password123!' })}
+                    className="p-2 bg-[#0c1527] border border-[#1e2e4e] rounded-xl text-center hover:bg-[#15233e] transition-colors cursor-pointer"
+                  >
+                    <div className="font-bold text-slate-200">Ali</div>
+                    <div className="text-[9px] text-slate-400">User</div>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setAuthForm({ ...authForm, username: 'farman', password: 'Password123!' })}
+                    className="p-2 bg-[#0c1527] border border-[#1e2e4e] rounded-xl text-center hover:bg-[#15233e] transition-colors cursor-pointer"
+                  >
+                    <div className="font-bold text-slate-200">Farman</div>
+                    <div className="text-[9px] text-slate-400">User</div>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {authMode === 'register' && (
               <>
                 <div>

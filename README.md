@@ -113,11 +113,11 @@ Open your browser and navigate to:
 
 ## Default Demo Credentials
 
-| Full Name | Username | Password | System Role |
-|-----------|----------|----------|-------------|
-| **Areeba Malik** | `areeba` | `Password123!` | **Administrator** |
-| **Omar Khan** | `omar` | `Password123!` | Standard User |
-| **Sarah Ali** | `sarah` | `Password123!` | Standard User |
+| Full Name | Username | Password | System Role | Permissions |
+|---|---|---|---|---|
+| **Syed Muhammad Mashaf Zaidi** | `mashaf` | `Password123!` | **Administrator** | Full Workspace Admin, Audit Verification, Document Owner |
+| **Ali Raza** | `ali` | `Password123!` | Standard User | Document Owner & Collaborator |
+| **Farman Ahmed** | `farman` | `Password123!` | Standard User | Document Owner & Collaborator |
 
 ---
 
