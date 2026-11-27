@@ -64,6 +64,10 @@ const DocumentSchema = new mongoose.Schema({
       expiresAt: { type: Date, default: null }
     }
   ],
+  isArchived: { type: Boolean, default: false },
+  isTrashed: { type: Boolean, default: false },
+  trashedAt: { type: Date, default: null },
+  starredBy: [{ type: String }],
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now }
 });

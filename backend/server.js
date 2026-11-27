@@ -329,17 +329,19 @@ app.get('/api/documents', pep.authenticate, async (req, res) => {
   // Filter documents where user is owner OR user exists in wrappedDEKs ACL
   const accessibleDocs = allDocs.filter(d => {
     if (d.ownerId === userId) return true;
-    return d.wrappedDEKs.some(w => w.userId === userId);
+    return d.wrappedDEKs && d.wrappedDEKs.some(w => w.userId === userId);
   });
 
-  const totalCount = accessibleDocs.length;
-  const sharedWithMeCount = accessibleDocs.filter(d => d.ownerId !== userId).length;
-  const protectedCount = accessibleDocs.length;
-  const totalBytes = accessibleDocs.reduce((acc, d) => acc + (d.size || 0), 0);
+  const activeDocs = accessibleDocs.filter(d => !d.isTrashed && !d.isArchived);
+  const totalCount = activeDocs.length;
+  const sharedWithMeCount = activeDocs.filter(d => d.ownerId !== userId).length;
+  const protectedCount = activeDocs.length;
+  const totalBytes = activeDocs.reduce((acc, d) => acc + (d.size || 0), 0);
 
   res.json({
     documents: accessibleDocs.map(d => {
-      const myAcl = d.wrappedDEKs.find(w => w.userId === userId);
+      const myAcl = d.wrappedDEKs ? d.wrappedDEKs.find(w => w.userId === userId) : null;
+      const starredList = Array.isArray(d.starredBy) ? d.starredBy : [];
       return {
         id: d.id,
         originalName: d.originalName,
@@ -350,7 +352,11 @@ app.get('/api/documents', pep.authenticate, async (req, res) => {
         isOwner: (d.ownerId === userId),
         myPermission: (d.ownerId === userId) ? 'owner' : (myAcl?.permission || 'none'),
         expiresAt: myAcl?.expiresAt || null,
-        sharedUsers: d.wrappedDEKs.map(w => ({
+        isStarred: starredList.includes(userId),
+        isArchived: !!d.isArchived,
+        isTrashed: !!d.isTrashed,
+        trashedAt: d.trashedAt || null,
+        sharedUsers: (d.wrappedDEKs || []).map(w => ({
           userId: w.userId,
           userName: w.userName,
           permission: w.permission
@@ -536,7 +542,129 @@ app.post('/api/documents/:id/revoke', pep.authenticate, pep.enforceDocAccess('re
   }
 });
 
-// Delete Document
+// Toggle Star on Document
+app.post('/api/documents/:id/star', pep.authenticate, pep.enforceDocAccess('read'), async (req, res) => {
+  try {
+    const doc = req.doc;
+    const userId = req.user.id;
+    let starred = Array.isArray(doc.starredBy) ? [...doc.starredBy] : [];
+    const isCurrentlyStarred = starred.includes(userId);
+
+    if (isCurrentlyStarred) {
+      starred = starred.filter(id => id !== userId);
+    } else {
+      starred.push(userId);
+    }
+
+    await db.updateDoc(doc.id, { starredBy: starred });
+    res.json({
+      message: isCurrentlyStarred ? 'Removed from Starred' : 'Added to Starred',
+      isStarred: !isCurrentlyStarred
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Toggle Archive on Document
+app.post('/api/documents/:id/archive', pep.authenticate, pep.enforceDocAccess('write'), async (req, res) => {
+  try {
+    const doc = req.doc;
+    const newArchivedState = !doc.isArchived;
+    await db.updateDoc(doc.id, { isArchived: newArchivedState });
+
+    await auditChain.recordEvent({
+      actorId: req.user.id,
+      actorName: req.user.fullName,
+      actorRole: req.user.role,
+      action: newArchivedState ? 'DOCUMENT_ARCHIVED' : 'DOCUMENT_UNARCHIVED',
+      targetDocId: doc.id,
+      targetDocName: doc.originalName,
+      outcome: 'SUCCESS',
+      details: { isArchived: newArchivedState }
+    });
+
+    res.json({
+      message: newArchivedState ? 'Document moved to archive.' : 'Document unarchived.',
+      isArchived: newArchivedState
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Move Document to Trash (Soft Delete)
+app.post('/api/documents/:id/trash', pep.authenticate, pep.enforceDocAccess('delete'), async (req, res) => {
+  try {
+    const doc = req.doc;
+    await db.updateDoc(doc.id, { isTrashed: true, trashedAt: new Date() });
+
+    await auditChain.recordEvent({
+      actorId: req.user.id,
+      actorName: req.user.fullName,
+      actorRole: req.user.role,
+      action: 'DOCUMENT_TRASHED',
+      targetDocId: doc.id,
+      targetDocName: doc.originalName,
+      outcome: 'SUCCESS'
+    });
+
+    res.json({ message: 'Document moved to Trash.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Restore Document from Trash
+app.post('/api/documents/:id/restore', pep.authenticate, pep.enforceDocAccess('delete'), async (req, res) => {
+  try {
+    const doc = req.doc;
+    await db.updateDoc(doc.id, { isTrashed: false, trashedAt: null });
+
+    await auditChain.recordEvent({
+      actorId: req.user.id,
+      actorName: req.user.fullName,
+      actorRole: req.user.role,
+      action: 'DOCUMENT_RESTORED',
+      targetDocId: doc.id,
+      targetDocName: doc.originalName,
+      outcome: 'SUCCESS'
+    });
+
+    res.json({ message: 'Document restored from Trash.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Empty All Trashed Documents
+app.post('/api/documents/trash/empty', pep.authenticate, async (req, res) => {
+  try {
+    const allDocs = await db.getDocuments();
+    const trashedDocs = allDocs.filter(d => d.ownerId === req.user.id && d.isTrashed);
+
+    for (const doc of trashedDocs) {
+      storage.deleteEncryptedBlob(doc.id);
+      await db.deleteDoc(doc.id);
+      await auditChain.recordEvent({
+        actorId: req.user.id,
+        actorName: req.user.fullName,
+        actorRole: req.user.role,
+        action: 'DOCUMENT_PURGED',
+        targetDocId: doc.id,
+        targetDocName: doc.originalName,
+        outcome: 'SUCCESS',
+        details: { permanentPurge: true }
+      });
+    }
+
+    res.json({ message: `Purged ${trashedDocs.length} documents from Trash.` });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Delete Document (Permanent)
 app.delete('/api/documents/:id', pep.authenticate, pep.enforceDocAccess('delete'), async (req, res) => {
   try {
     const doc = req.doc;
@@ -557,7 +685,7 @@ app.delete('/api/documents/:id', pep.authenticate, pep.enforceDocAccess('delete'
       }
     });
 
-    res.json({ message: 'Document and encrypted vault blob deleted successfully.' });
+    res.json({ message: 'Document and encrypted vault blob deleted permanently.' });
   } catch (err) {
     console.error('Delete error:', err);
     res.status(500).json({ error: 'Failed to delete document.', details: err.message });

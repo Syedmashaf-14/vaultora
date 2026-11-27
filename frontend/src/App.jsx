@@ -620,6 +620,99 @@ export default function App() {
     }
   };
 
+  // 12. Toggle Star on Document
+  const handleToggleStar = async (doc) => {
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/star`, { method: 'POST' });
+      if (!res.ok) throw new Error('Failed to update star');
+      const data = await res.json();
+      showToast(data.message || (data.isStarred ? 'Added to Starred' : 'Removed from Starred'), 'info');
+      await loadDashboardData();
+    } catch (err) {
+      showToast(`Star error: ${err.message}`, 'error');
+    }
+  };
+
+  // 13. Toggle Archive on Document
+  const handleToggleArchive = async (doc) => {
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/archive`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Archive operation failed');
+      }
+      const data = await res.json();
+      showToast(data.message, 'success');
+      await loadDashboardData();
+    } catch (err) {
+      showToast(`Archive error: ${err.message}`, 'error');
+    }
+  };
+
+  // 14. Move Document to Trash (Soft Delete)
+  const handleMoveToTrash = async (doc) => {
+    if (!window.confirm(`Move "${doc.originalName}" to Trash?`)) return;
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/trash`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to move to trash');
+      }
+      showToast(`"${doc.originalName}" moved to Trash.`, 'info');
+      await loadDashboardData();
+    } catch (err) {
+      showToast(`Trash error: ${err.message}`, 'error');
+    }
+  };
+
+  // 15. Restore Document from Trash
+  const handleRestoreFromTrash = async (doc) => {
+    try {
+      const res = await fetch(`/api/documents/${doc.id}/restore`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to restore');
+      }
+      showToast(`"${doc.originalName}" restored to workspace.`, 'success');
+      await loadDashboardData();
+    } catch (err) {
+      showToast(`Restore error: ${err.message}`, 'error');
+    }
+  };
+
+  // 16. Permanently Purge Document
+  const handlePermanentDelete = async (doc) => {
+    if (!window.confirm(`Permanently purge "${doc.originalName}" from vault storage and MongoDB? This action cannot be reversed.`)) {
+      return;
+    }
+    try {
+      const res = await fetch(`/api/documents/${doc.id}`, { method: 'DELETE' });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Delete failed');
+      }
+      showToast(`Document purged permanently.`, 'info');
+      await loadDashboardData();
+    } catch (err) {
+      showToast(`Delete error: ${err.message}`, 'error');
+    }
+  };
+
+  // 17. Empty All Trash
+  const handleEmptyTrash = async () => {
+    if (!window.confirm('Empty Trash: Permanently delete all items currently in your trash? This action cannot be undone.')) {
+      return;
+    }
+    try {
+      const res = await fetch('/api/documents/trash/empty', { method: 'POST' });
+      const data = await res.json();
+      showToast(data.message || 'Trash emptied permanently.', 'success');
+      await loadDashboardData();
+    } catch (err) {
+      showToast(`Empty trash error: ${err.message}`, 'error');
+    }
+  };
+
   const formatBytes = (bytes) => {
     if (!bytes || bytes === 0) return '0 B';
     const k = 1024;
@@ -658,14 +751,41 @@ export default function App() {
     );
   };
 
-  // Filtered documents
-  const filteredDocs = documents.filter(doc => {
-    const matchesSearch = doc.originalName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-                          doc.ownerName.toLowerCase().includes(searchQuery.toLowerCase());
-    if (activeTab === 'mydocs') return matchesSearch && doc.isOwner;
-    if (activeTab === 'shared') return matchesSearch && !doc.isOwner;
-    return matchesSearch;
-  });
+  // Filtered and sorted documents based on active navigation tab
+  const filteredDocs = documents
+    .filter(doc => {
+      const matchesSearch =
+        doc.originalName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        doc.ownerName.toLowerCase().includes(searchQuery.toLowerCase());
+      if (!matchesSearch) return false;
+
+      // Trash view: strictly shows trashed documents
+      if (activeTab === 'trash') {
+        return !!doc.isTrashed;
+      }
+      // All other views exclude trashed documents
+      if (doc.isTrashed) return false;
+
+      // Archive view: strictly shows archived documents
+      if (activeTab === 'archive') {
+        return !!doc.isArchived;
+      }
+      // Standard views exclude archived documents
+      if (doc.isArchived) return false;
+
+      if (activeTab === 'mydocs') return doc.isOwner;
+      if (activeTab === 'shared') return !doc.isOwner;
+      if (activeTab === 'starred') return !!doc.isStarred;
+      if (activeTab === 'recent') return true;
+
+      return true; // 'overview' shows all active documents
+    })
+    .sort((a, b) => {
+      if (activeTab === 'recent') {
+        return new Date(b.updatedAt || b.createdAt) - new Date(a.updatedAt || a.createdAt);
+      }
+      return new Date(b.createdAt) - new Date(a.createdAt);
+    });
 
   // ============================================================
   // VIEW A: DEDICATED LOGIN & SIGN UP INTERFACE (MONGODB BACKED)
@@ -956,7 +1076,7 @@ export default function App() {
                   <span>My documents</span>
                 </div>
                 <span className="text-xs bg-slate-800/80 text-slate-300 px-2 py-0.5 rounded-full border border-slate-700">
-                  {documents.filter(d => d.isOwner).length}
+                  {documents.filter(d => d.isOwner && !d.isTrashed && !d.isArchived).length}
                 </span>
               </button>
 
@@ -973,23 +1093,56 @@ export default function App() {
                   <span>Shared with me</span>
                 </div>
                 <span className="text-xs bg-slate-800/80 text-slate-300 px-2 py-0.5 rounded-full border border-slate-700">
-                  {documents.filter(d => !d.isOwner).length}
+                  {documents.filter(d => !d.isOwner && !d.isTrashed && !d.isArchived).length}
                 </span>
               </button>
 
-              <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:bg-[#15233e] hover:text-slate-200 transition-colors">
-                <Star className="w-4 h-4" />
-                <span>Starred</span>
+              <button
+                onClick={() => setActiveTab('starred')}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
+                  activeTab === 'starred'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:bg-[#15233e] hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Star className="w-4 h-4 text-amber-400" />
+                  <span>Starred</span>
+                </div>
+                <span className="text-xs bg-slate-800/80 text-slate-300 px-2 py-0.5 rounded-full border border-slate-700">
+                  {documents.filter(d => d.isStarred && !d.isTrashed).length}
+                </span>
               </button>
 
-              <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:bg-[#15233e] hover:text-slate-200 transition-colors">
-                <Clock className="w-4 h-4" />
-                <span>Recent</span>
+              <button
+                onClick={() => setActiveTab('recent')}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
+                  activeTab === 'recent'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:bg-[#15233e] hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Clock className="w-4 h-4 text-sky-400" />
+                  <span>Recent</span>
+                </div>
               </button>
 
-              <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:bg-[#15233e] hover:text-slate-200 transition-colors">
-                <Archive className="w-4 h-4" />
-                <span>Archive</span>
+              <button
+                onClick={() => setActiveTab('archive')}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
+                  activeTab === 'archive'
+                    ? 'bg-blue-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:bg-[#15233e] hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Archive className="w-4 h-4 text-purple-400" />
+                  <span>Archive</span>
+                </div>
+                <span className="text-xs bg-slate-800/80 text-slate-300 px-2 py-0.5 rounded-full border border-slate-700">
+                  {documents.filter(d => d.isArchived && !d.isTrashed).length}
+                </span>
               </button>
             </nav>
 
@@ -997,9 +1150,23 @@ export default function App() {
               Manage
             </div>
             <nav className="space-y-1">
-              <button className="w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-slate-400 hover:bg-[#15233e] hover:text-slate-200 transition-colors">
-                <Trash2 className="w-4 h-4" />
-                <span>Trash</span>
+              <button
+                onClick={() => setActiveTab('trash')}
+                className={`w-full flex items-center justify-between px-3 py-2.5 rounded-lg text-sm font-medium transition-colors cursor-pointer ${
+                  activeTab === 'trash'
+                    ? 'bg-rose-600 text-white shadow-sm'
+                    : 'text-slate-300 hover:bg-[#15233e] hover:text-white'
+                }`}
+              >
+                <div className="flex items-center gap-3">
+                  <Trash2 className="w-4 h-4 text-rose-400" />
+                  <span>Trash</span>
+                </div>
+                {documents.filter(d => d.isTrashed).length > 0 && (
+                  <span className="text-xs bg-rose-900/60 text-rose-200 px-2 py-0.5 rounded-full border border-rose-700 font-bold">
+                    {documents.filter(d => d.isTrashed).length}
+                  </span>
+                )}
               </button>
               <button
                 onClick={() => setShowSecurityCenter(true)}
@@ -1186,15 +1353,50 @@ export default function App() {
             <div className="lg:col-span-2 bg-white rounded-2xl border border-slate-200/80 shadow-xs overflow-hidden">
               <div className="p-5 border-b border-slate-100 flex items-center justify-between">
                 <div>
-                  <h2 className="text-base font-bold text-slate-900">Recent documents</h2>
-                  <p className="text-xs text-slate-400">Your latest secured files in MongoDB.</p>
+                  <h2 className="text-base font-bold text-slate-900">
+                    {activeTab === 'starred' && 'Starred documents'}
+                    {activeTab === 'recent' && 'Recent documents'}
+                    {activeTab === 'archive' && 'Archived documents'}
+                    {activeTab === 'trash' && 'Trash'}
+                    {activeTab === 'mydocs' && 'My documents'}
+                    {activeTab === 'shared' && 'Shared with me'}
+                    {activeTab === 'overview' && 'Recent documents'}
+                  </h2>
+                  <p className="text-xs text-slate-400">
+                    {activeTab === 'starred' && 'Your flagged quick-access secure documents.'}
+                    {activeTab === 'recent' && 'Documents sorted by most recent activity.'}
+                    {activeTab === 'archive' && 'Cold-storage documents protected from modifications.'}
+                    {activeTab === 'trash' && 'Soft-deleted documents pending permanent purge or restoration.'}
+                    {activeTab === 'mydocs' && 'Encrypted documents uploaded and owned by you.'}
+                    {activeTab === 'shared' && 'Documents shared with you with wrapped DEKs.'}
+                    {activeTab === 'overview' && 'Your latest secured files in MongoDB.'}
+                  </p>
                 </div>
-                <button
-                  onClick={() => setActiveTab('overview')}
-                  className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
-                >
-                  View all documents
-                </button>
+                {activeTab === 'trash' ? (
+                  filteredDocs.length > 0 && (
+                    <button
+                      onClick={handleEmptyTrash}
+                      className="px-3 py-1.5 bg-rose-50 hover:bg-rose-100 text-rose-600 rounded-lg text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>Empty Trash</span>
+                    </button>
+                  )
+                ) : activeTab !== 'overview' ? (
+                  <button
+                    onClick={() => setActiveTab('overview')}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
+                  >
+                    Back to Overview
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => setActiveTab('mydocs')}
+                    className="text-xs font-semibold text-blue-600 hover:text-blue-700 cursor-pointer"
+                  >
+                    View all documents
+                  </button>
+                )}
               </div>
 
               {/* Table */}
@@ -1213,21 +1415,82 @@ export default function App() {
                     {filteredDocs.length === 0 ? (
                       <tr>
                         <td colSpan="5" className="py-12 text-center text-slate-400">
-                          <Lock className="w-8 h-8 mx-auto mb-2 text-slate-300" />
-                          <p className="font-semibold text-slate-600">No encrypted documents uploaded yet.</p>
-                          <p className="text-[11px] mt-0.5">Click "+ Upload document" to test client-side envelope encryption.</p>
+                          {activeTab === 'starred' && (
+                            <>
+                              <Star className="w-8 h-8 mx-auto mb-2 text-amber-300" />
+                              <p className="font-semibold text-slate-600">No starred documents.</p>
+                              <p className="text-[11px] mt-0.5">Click the star icon on any document row to flag it for quick access.</p>
+                            </>
+                          )}
+                          {activeTab === 'recent' && (
+                            <>
+                              <Clock className="w-8 h-8 mx-auto mb-2 text-sky-300" />
+                              <p className="font-semibold text-slate-600">No recent documents found.</p>
+                              <p className="text-[11px] mt-0.5">Upload or decrypt documents to see your activity timeline.</p>
+                            </>
+                          )}
+                          {activeTab === 'archive' && (
+                            <>
+                              <Archive className="w-8 h-8 mx-auto mb-2 text-purple-300" />
+                              <p className="font-semibold text-slate-600">No archived documents.</p>
+                              <p className="text-[11px] mt-0.5">Move older documents to Archive for encrypted cold storage.</p>
+                            </>
+                          )}
+                          {activeTab === 'trash' && (
+                            <>
+                              <Trash2 className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                              <p className="font-semibold text-slate-600">Trash is empty.</p>
+                              <p className="text-[11px] mt-0.5">Soft-deleted documents will appear here before permanent purging.</p>
+                            </>
+                          )}
+                          {['overview', 'mydocs', 'shared'].includes(activeTab) && (
+                            <>
+                              <Lock className="w-8 h-8 mx-auto mb-2 text-slate-300" />
+                              <p className="font-semibold text-slate-600">No encrypted documents found.</p>
+                              <p className="text-[11px] mt-0.5">Click "+ Upload document" to test client-side envelope encryption.</p>
+                            </>
+                          )}
                         </td>
                       </tr>
                     ) : (
                       filteredDocs.map((doc) => (
                         <tr key={doc.id} className="hover:bg-slate-50/60 transition-colors group">
-                          {/* Name + File Type */}
+                          {/* Name + File Type + Quick Star */}
                           <td className="py-3 px-5">
                             <div className="flex items-center gap-3">
+                              {!doc.isTrashed && (
+                                <button
+                                  type="button"
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    handleToggleStar(doc);
+                                  }}
+                                  title={doc.isStarred ? 'Remove from Starred' : 'Add to Starred'}
+                                  className="p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer shrink-0"
+                                >
+                                  <Star
+                                    className={`w-4 h-4 transition-colors ${
+                                      doc.isStarred
+                                        ? 'fill-amber-400 text-amber-400'
+                                        : 'text-slate-300 hover:text-amber-400'
+                                    }`}
+                                  />
+                                </button>
+                              )}
                               {getFileIcon(doc.fileType)}
                               <div>
-                                <div className="font-semibold text-slate-800 text-xs group-hover:text-blue-600 transition-colors">
-                                  {doc.originalName}
+                                <div className="font-semibold text-slate-800 text-xs group-hover:text-blue-600 transition-colors flex items-center gap-2">
+                                  <span>{doc.originalName}</span>
+                                  {doc.isArchived && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-bold uppercase tracking-wider">
+                                      Archived
+                                    </span>
+                                  )}
+                                  {doc.isTrashed && (
+                                    <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase tracking-wider">
+                                      In Trash
+                                    </span>
+                                  )}
                                 </div>
                                 <div className="text-[10px] text-slate-400 uppercase tracking-wider">
                                   {doc.fileType} • {formatBytes(doc.size)}
@@ -1274,81 +1537,122 @@ export default function App() {
 
                           {/* Action Menu */}
                           <td className="py-3 px-4 text-right relative">
-                            <button
-                              onClick={() => setActiveMenuDocId(activeMenuDocId === doc.id ? null : doc.id)}
-                              className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-                            >
-                              <MoreVertical className="w-4 h-4" />
-                            </button>
-
-                            {/* Dropdown Menu */}
-                            {activeMenuDocId === doc.id && (
-                              <div
-                                onMouseLeave={() => setActiveMenuDocId(null)}
-                                className="absolute right-4 top-10 w-52 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-20 text-left text-xs"
-                              >
+                            {doc.isTrashed ? (
+                              <div className="flex items-center justify-end gap-1">
                                 <button
-                                  onClick={() => {
-                                    setActiveMenuDocId(null);
-                                    handleDownloadAndDecrypt(doc);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
+                                  onClick={() => handleRestoreFromTrash(doc)}
+                                  className="px-2.5 py-1 text-xs font-semibold text-blue-600 hover:bg-blue-50 rounded-lg transition-colors cursor-pointer"
+                                  title="Restore to active workspace"
                                 >
-                                  <Download className="w-3.5 h-3.5 text-blue-600" />
-                                  <span>Download & Decrypt</span>
+                                  Restore
                                 </button>
-
-                                <button
-                                  onClick={() => {
-                                    setActiveMenuDocId(null);
-                                    setSelectedDoc(doc);
-                                    setShowShareModal(true);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
-                                >
-                                  <Share2 className="w-3.5 h-3.5 text-slate-400" />
-                                  <span>Share with User (Wrap DEK)</span>
-                                </button>
-
-                                <button
-                                  onClick={() => {
-                                    setActiveMenuDocId(null);
-                                    handleInspectStorage(doc.id);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
-                                >
-                                  <Eye className="w-3.5 h-3.5 text-slate-400" />
-                                  <span>Inspect Vault Disk Blob</span>
-                                </button>
-
-                                <button
-                                  onClick={() => {
-                                    setActiveMenuDocId(null);
-                                    handleSimulateBitFlip(doc.id);
-                                  }}
-                                  className="w-full flex items-center gap-2 px-3.5 py-2 text-amber-600 hover:bg-amber-50 cursor-pointer"
-                                >
-                                  <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                                  <span>Simulate Bit-Flip Tamper</span>
-                                </button>
-
                                 {doc.isOwner && (
                                   <button
-                                    onClick={async () => {
-                                      setActiveMenuDocId(null);
-                                      if (window.confirm(`Delete "${doc.originalName}" permanently from disk vault and MongoDB?`)) {
-                                        await fetch(`/api/documents/${doc.id}`, { method: 'DELETE' });
-                                        showToast('Document deleted.', 'info');
-                                        await loadDashboardData();
-                                      }
-                                    }}
-                                    className="w-full flex items-center gap-2 px-3.5 py-2 text-rose-600 hover:bg-rose-50 border-t border-slate-100 cursor-pointer"
+                                    onClick={() => handlePermanentDelete(doc)}
+                                    className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                    title="Permanently Purge"
                                   >
-                                    <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                                    <span>Delete Document</span>
+                                    <Trash2 className="w-4 h-4" />
                                   </button>
                                 )}
                               </div>
+                            ) : (
+                              <>
+                                <button
+                                  onClick={() => setActiveMenuDocId(activeMenuDocId === doc.id ? null : doc.id)}
+                                  className="p-1.5 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+                                >
+                                  <MoreVertical className="w-4 h-4" />
+                                </button>
+
+                                {/* Dropdown Menu */}
+                                {activeMenuDocId === doc.id && (
+                                  <div
+                                    onMouseLeave={() => setActiveMenuDocId(null)}
+                                    className="absolute right-4 top-10 w-52 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-20 text-left text-xs"
+                                  >
+                                    <button
+                                      onClick={() => {
+                                        setActiveMenuDocId(null);
+                                        handleDownloadAndDecrypt(doc);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
+                                    >
+                                      <Download className="w-3.5 h-3.5 text-blue-600" />
+                                      <span>Download & Decrypt</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        setActiveMenuDocId(null);
+                                        setSelectedDoc(doc);
+                                        setShowShareModal(true);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                    >
+                                      <Share2 className="w-3.5 h-3.5 text-slate-400" />
+                                      <span>Share with User (Wrap DEK)</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        setActiveMenuDocId(null);
+                                        handleToggleStar(doc);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-amber-50 hover:text-amber-700 cursor-pointer"
+                                    >
+                                      <Star className="w-3.5 h-3.5 text-amber-500" />
+                                      <span>{doc.isStarred ? 'Remove from Starred' : 'Add to Starred'}</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        setActiveMenuDocId(null);
+                                        handleToggleArchive(doc);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-purple-50 hover:text-purple-700 cursor-pointer"
+                                    >
+                                      <Archive className="w-3.5 h-3.5 text-purple-500" />
+                                      <span>{doc.isArchived ? 'Unarchive Document' : 'Move to Archive'}</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        setActiveMenuDocId(null);
+                                        handleInspectStorage(doc.id);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                    >
+                                      <Eye className="w-3.5 h-3.5 text-slate-400" />
+                                      <span>Inspect Vault Disk Blob</span>
+                                    </button>
+
+                                    <button
+                                      onClick={() => {
+                                        setActiveMenuDocId(null);
+                                        handleSimulateBitFlip(doc.id);
+                                      }}
+                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-amber-600 hover:bg-amber-50 cursor-pointer"
+                                    >
+                                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                                      <span>Simulate Bit-Flip Tamper</span>
+                                    </button>
+
+                                    {doc.isOwner && (
+                                      <button
+                                        onClick={() => {
+                                          setActiveMenuDocId(null);
+                                          handleMoveToTrash(doc);
+                                        }}
+                                        className="w-full flex items-center gap-2 px-3.5 py-2 text-rose-600 hover:bg-rose-50 border-t border-slate-100 cursor-pointer"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                                        <span>Move to Trash</span>
+                                      </button>
+                                    )}
+                                  </div>
+                                )}
+                              </>
                             )}
                           </td>
                         </tr>
