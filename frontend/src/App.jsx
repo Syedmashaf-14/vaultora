@@ -43,6 +43,7 @@ import {
   bufferToBase64,
   base64ToBuffer
 } from './cryptoEngine';
+import demoKeys from './demoKeys.json';
 
 export default function App() {
   // Navigation & View State
@@ -112,7 +113,21 @@ export default function App() {
       if (res.ok) {
         const data = await res.json();
         setCurrentUser(data.user);
-        // Attempt unlock if password cached in session, else will prompt on cryptographic action
+
+        // Ensure demo keys are ready in localStorage for demo users
+        if (demoKeys && demoKeys[data.user.id]) {
+          const stored = localStorage.getItem(`vaultora_key_${data.user.id}`);
+          if (!stored || JSON.parse(stored).publicKeyPem !== demoKeys[data.user.id].publicKeyPem) {
+            localStorage.setItem(`vaultora_key_${data.user.id}`, JSON.stringify(demoKeys[data.user.id]));
+          }
+          try {
+            const privKey = await loadAndDecryptPrivateKey('Password123!', data.user.id);
+            setUserPrivateKey(privKey);
+          } catch (e) {
+            console.warn('Auto-unlock private key deferred:', e);
+          }
+        }
+
         await loadDashboardData();
       } else {
         setCurrentUser(null);
@@ -164,7 +179,9 @@ export default function App() {
       }
 
       // Re-map local private key under the assigned user id
-      await encryptAndStorePrivateKey(keyPair.privateKey, password, data.user.id);
+      const keyRecord = await encryptAndStorePrivateKey(keyPair.privateKey, password, data.user.id);
+      keyRecord.publicKeyPem = keyPair.publicKeyPem;
+      localStorage.setItem(`vaultora_key_${data.user.id}`, JSON.stringify(keyRecord));
       setUserPrivateKey(keyPair.privateKey);
       setCurrentUser(data.user);
 
@@ -203,14 +220,46 @@ export default function App() {
       }
 
       setCryptoStatus('Unlocking local RSA Private Key from storage...');
+
+      // Seed demo key if this is a pre-seeded account
+      if (demoKeys && demoKeys[data.user.id]) {
+        const stored = localStorage.getItem(`vaultora_key_${data.user.id}`);
+        if (!stored || JSON.parse(stored).publicKeyPem !== demoKeys[data.user.id].publicKeyPem) {
+          localStorage.setItem(`vaultora_key_${data.user.id}`, JSON.stringify(demoKeys[data.user.id]));
+        }
+      }
+
       try {
         const privKey = await loadAndDecryptPrivateKey(password, data.user.id);
         setUserPrivateKey(privKey);
+
+        // Verify if local key matches user's public key in MongoDB
+        const stored = localStorage.getItem(`vaultora_key_${data.user.id}`);
+        if (stored) {
+          const rec = JSON.parse(stored);
+          if (rec.publicKeyPem && rec.publicKeyPem !== data.user.publicKeyPem) {
+            await fetch('/api/auth/sync-key', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ publicKeyPem: rec.publicKeyPem })
+            });
+            data.user.publicKeyPem = rec.publicKeyPem;
+          }
+        }
       } catch {
-        console.warn('Private key not found on this browser endpoint. Generating fresh keypair...');
+        console.warn('Generating fresh keypair and synchronizing with MongoDB...');
         const keyPair = await generateUserKeyPair();
-        await encryptAndStorePrivateKey(keyPair.privateKey, password, data.user.id);
+        const keyRecord = await encryptAndStorePrivateKey(keyPair.privateKey, password, data.user.id);
+        keyRecord.publicKeyPem = keyPair.publicKeyPem;
+        localStorage.setItem(`vaultora_key_${data.user.id}`, JSON.stringify(keyRecord));
         setUserPrivateKey(keyPair.privateKey);
+
+        await fetch('/api/auth/sync-key', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ publicKeyPem: keyPair.publicKeyPem })
+        });
+        data.user.publicKeyPem = keyPair.publicKeyPem;
       }
 
       setCurrentUser(data.user);
@@ -284,7 +333,17 @@ export default function App() {
       const fileBuffer = await uploadFile.arrayBuffer();
 
       setUploadProgress('Generating 256-bit AES-GCM DEK & 12-byte IV...');
-      const pubKey = await importPublicKey(currentUser.publicKeyPem);
+      // Ensure we use the exact public key matching the active private key
+      let ownerPem = currentUser.publicKeyPem;
+      const storedKey = localStorage.getItem(`vaultora_key_${currentUser.id}`);
+      if (storedKey) {
+        try {
+          const parsed = JSON.parse(storedKey);
+          if (parsed.publicKeyPem) ownerPem = parsed.publicKeyPem;
+        } catch {}
+      }
+
+      const pubKey = await importPublicKey(ownerPem);
 
       setUploadProgress('Encrypting file locally via AES-256-GCM...');
       const encResult = await encryptDocument(fileBuffer, pubKey);
@@ -357,14 +416,23 @@ export default function App() {
         setUserPrivateKey(privKey);
       }
 
-      const { decryptedBuffer, verifiedSha512 } = await decryptDocument(
-        encryptedBuffer,
-        meta.iv,
-        meta.authTag,
-        meta.sha512 || meta.sha256,
-        meta.userWrappedDEK,
-        privKey
-      );
+      let decryptedBuffer;
+      let verifiedSha512;
+      try {
+        const result = await decryptDocument(
+          encryptedBuffer,
+          meta.iv,
+          meta.authTag,
+          meta.sha512 || meta.sha256,
+          meta.userWrappedDEK,
+          privKey
+        );
+        decryptedBuffer = result.decryptedBuffer;
+        verifiedSha512 = result.verifiedSha512;
+      } catch (decryptErr) {
+        console.error('Decryption failed:', decryptErr);
+        throw new Error(decryptErr?.message || 'Cryptographic mismatch: This file was encrypted with a different key.');
+      }
 
       const blob = new Blob([decryptedBuffer]);
       const url = window.URL.createObjectURL(blob);
@@ -380,7 +448,8 @@ export default function App() {
       await loadDashboardData();
     } catch (err) {
       console.error('Decryption error:', err);
-      showToast(`Decryption failed: ${err.message}`, 'error');
+      const msg = err && err.message ? err.message : 'Cryptographic operation error';
+      showToast(`Decryption failed: ${msg}`, 'error');
     }
   };
 
@@ -393,6 +462,10 @@ export default function App() {
       showToast('Wrapping DEK with recipient RSA Public Key...', 'info');
 
       const metaRes = await fetch(`/api/documents/${selectedDoc.id}/metadata`);
+      if (!metaRes.ok) {
+        const errMeta = await metaRes.json();
+        throw new Error(errMeta.error || 'Failed to fetch document metadata');
+      }
       const { document: meta } = await metaRes.json();
 
       const recipient = allUsers.find(u => u.id === shareRecipientId);
@@ -409,11 +482,17 @@ export default function App() {
       }
 
       const wrappedBuffer = base64ToBuffer(meta.userWrappedDEK);
-      const rawDEK = await window.crypto.subtle.decrypt(
-        { name: 'RSA-OAEP' },
-        privKey,
-        wrappedBuffer
-      );
+      let rawDEK;
+      try {
+        rawDEK = await window.crypto.subtle.decrypt(
+          { name: 'RSA-OAEP' },
+          privKey,
+          wrappedBuffer
+        );
+      } catch (decryptErr) {
+        console.error('DEK unwrap failed:', decryptErr);
+        throw new Error('Key mismatch: Document was encrypted with an older public key. Please delete and re-upload the file to share it.');
+      }
 
       const recipientWrappedDEK = await wrapDEKForRecipient(rawDEK, recipient.publicKeyPem);
 
@@ -446,7 +525,8 @@ export default function App() {
       await loadDashboardData();
     } catch (err) {
       console.error('Sharing error:', err);
-      showToast(`Sharing failed: ${err.message}`, 'error');
+      const msg = err && err.message ? err.message : 'Cryptographic operation error';
+      showToast(`Sharing failed: ${msg}`, 'error');
     }
   };
 

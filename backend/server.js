@@ -209,6 +209,20 @@ app.get('/api/auth/me', pep.authenticate, (req, res) => {
   });
 });
 
+// Sync / Update Client Public Key in MongoDB
+app.post('/api/auth/sync-key', pep.authenticate, async (req, res) => {
+  try {
+    const { publicKeyPem } = req.body;
+    if (!publicKeyPem) {
+      return res.status(400).json({ error: 'Public key PEM is required.' });
+    }
+    await db.updateUser(req.user.id, { publicKeyPem });
+    res.json({ message: 'Client public key synchronized successfully in MongoDB.' });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Discover Users for Sharing (Returns public keys)
 app.get('/api/auth/users', pep.authenticate, async (req, res) => {
   const users = await db.getUsers();

@@ -8,5 +8,6 @@ backend/.env
 vault/*.enc
 !vault/.gitkeep
 *.tmp
+backend/data/*.json
 .DS_Store
 Thumbs.db
