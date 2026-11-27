@@ -1,16 +1,33 @@
 const fs = require('fs');
 const path = require('path');
+const { Readable } = require('stream');
+const mongoose = require('mongoose');
+const db = require('./database');
 
-const VAULT_DIR = path.resolve(__dirname, '..', 'vault');
+const VAULT_DIR = process.env.VERCEL
+  ? '/tmp/vaultora_vault'
+  : path.resolve(__dirname, '..', 'vault');
 
-if (!fs.existsSync(VAULT_DIR)) {
-  fs.mkdirSync(VAULT_DIR, { recursive: true });
+function ensureVaultDir() {
+  if (!fs.existsSync(VAULT_DIR)) {
+    fs.mkdirSync(VAULT_DIR, { recursive: true });
+  }
+}
+
+function sanitizeUuid(uuid) {
+  return path.basename(String(uuid || '')).replace(/[^a-zA-Z0-9-]/g, '');
 }
 
 function getBlobPath(uuid) {
-  // Enforce strict UUID filename format to prevent directory traversal
-  const sanitized = path.basename(uuid).replace(/[^a-zA-Z0-9-]/g, '');
+  const sanitized = sanitizeUuid(uuid);
   return path.join(VAULT_DIR, `${sanitized}.enc`);
+}
+
+function getGridBucket() {
+  if (db.isUsingMongoose()) {
+    return new mongoose.mongo.GridFSBucket(db.getMongoDb(), { bucketName: 'vault_blobs' });
+  }
+  return null;
 }
 
 function calculateShannonEntropy(buffer) {
@@ -30,32 +47,91 @@ function calculateShannonEntropy(buffer) {
 }
 
 const storage = {
-  saveEncryptedBlob(uuid, buffer) {
+  async saveEncryptedBlob(uuid, buffer) {
+    const sanitized = sanitizeUuid(uuid);
+    const filename = `${sanitized}.enc`;
+    const bucket = getGridBucket();
+
+    if (bucket) {
+      // Remove previous version if overwriting (e.g., bit-flip simulation or re-encryption)
+      const existing = await bucket.find({ filename }).toArray();
+      for (const f of existing) {
+        await bucket.delete(f._id);
+      }
+
+      await new Promise((resolve, reject) => {
+        const uploadStream = bucket.openUploadStream(filename, {
+          metadata: { uuid: sanitized, contentType: 'application/octet-stream' }
+        });
+        Readable.from(buffer)
+          .pipe(uploadStream)
+          .on('error', reject)
+          .on('finish', resolve);
+      });
+
+      return `gridfs://vault_blobs/${filename}`;
+    }
+
+    // Local disk fallback when MongoDB is unavailable
+    ensureVaultDir();
     const filePath = getBlobPath(uuid);
     fs.writeFileSync(filePath, buffer);
     return filePath;
   },
 
-  getEncryptedBlob(uuid) {
-    const filePath = getBlobPath(uuid);
-    if (!fs.existsSync(filePath)) {
-      return null;
-    }
-    return fs.readFileSync(filePath);
-  },
+  async getEncryptedBlob(uuid) {
+    const sanitized = sanitizeUuid(uuid);
+    const filename = `${sanitized}.enc`;
+    const bucket = getGridBucket();
 
-  deleteEncryptedBlob(uuid) {
+    if (bucket) {
+      const files = await bucket.find({ filename }).toArray();
+      if (files.length > 0) {
+        return await new Promise((resolve, reject) => {
+          const chunks = [];
+          bucket.openDownloadStream(files[0]._id)
+            .on('data', chunk => chunks.push(chunk))
+            .on('error', reject)
+            .on('end', () => resolve(Buffer.concat(chunks)));
+        });
+      }
+    }
+
+    // Fallback check for local disk blob (useful for local legacy files)
     const filePath = getBlobPath(uuid);
     if (fs.existsSync(filePath)) {
-      fs.unlinkSync(filePath);
-      return true;
+      return fs.readFileSync(filePath);
     }
-    return false;
+    return null;
+  },
+
+  async deleteEncryptedBlob(uuid) {
+    const sanitized = sanitizeUuid(uuid);
+    const filename = `${sanitized}.enc`;
+    const bucket = getGridBucket();
+    let deleted = false;
+
+    if (bucket) {
+      const files = await bucket.find({ filename }).toArray();
+      for (const f of files) {
+        await bucket.delete(f._id);
+        deleted = true;
+      }
+    }
+
+    if (!process.env.VERCEL) {
+      const filePath = getBlobPath(uuid);
+      if (fs.existsSync(filePath)) {
+        fs.unlinkSync(filePath);
+        deleted = true;
+      }
+    }
+    return deleted;
   },
 
   // Part 3 Adversarial Inspection: Prove storage holds only raw high-entropy ciphertext
-  inspectBlob(uuid) {
-    const buffer = this.getEncryptedBlob(uuid);
+  async inspectBlob(uuid) {
+    const buffer = await this.getEncryptedBlob(uuid);
     if (!buffer) return null;
     const entropy = calculateShannonEntropy(buffer);
     const hexSample = buffer.subarray(0, 32).toString('hex');
@@ -64,6 +140,7 @@ const storage = {
     return {
       uuid,
       blobFileName: `${uuid}.enc`,
+      storageBackend: db.isUsingMongoose() ? 'MongoDB GridFS (vault_blobs)' : 'Local Vault (/vault/)',
       sizeBytes: buffer.length,
       shannonEntropy: entropy.toFixed(4) + ' / 8.0000 (Maximum Randomness)',
       first32BytesHex: hexSample,
@@ -74,18 +151,18 @@ const storage = {
   },
 
   // Part 3 Adversarial Tampering: Flips 1 bit in stored ciphertext to test AEAD verification
-  tamperBlobBit(uuid) {
-    const filePath = getBlobPath(uuid);
-    if (!fs.existsSync(filePath)) {
+  async tamperBlobBit(uuid) {
+    const buffer = await this.getEncryptedBlob(uuid);
+    if (!buffer) {
       throw new Error(`Blob not found: ${uuid}`);
     }
-    const buffer = fs.readFileSync(filePath);
     if (buffer.length === 0) {
-      throw new Error(`Cannot tamper empty blob`);
+      throw new Error('Cannot tamper empty blob');
     }
-    // Flip bit 0 of the first byte
-    buffer[0] ^= 0x01;
-    fs.writeFileSync(filePath, buffer);
+    const tampered = Buffer.from(buffer);
+    tampered[0] ^= 0x01;
+    await this.saveEncryptedBlob(uuid, tampered);
+
     return {
       uuid,
       tamperedByteOffset: 0,

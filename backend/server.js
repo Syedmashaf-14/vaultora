@@ -14,19 +14,43 @@ const pep = require('./pep');
 const app = express();
 const PORT = process.env.PORT || 5000;
 
+// Trust proxy headers (needed on Vercel / reverse proxies for req.secure / HTTPS cookies)
+app.set('trust proxy', 1);
+
 // Setup Multer memory storage for incoming encrypted payloads
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 100 * 1024 * 1024 } // 100MB
+  limits: { fileSize: 100 * 1024 * 1024 } // 100MB local (note: Vercel caps request bodies at ~4.5MB)
 });
 
 // Middleware
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+  origin: (origin, callback) => {
+    if (!origin) return callback(null, true);
+    if (
+      origin.startsWith('http://localhost:') ||
+      origin.startsWith('http://127.0.0.1:') ||
+      origin.endsWith('.vercel.app') ||
+      (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL)
+    ) {
+      return callback(null, true);
+    }
+    return callback(null, true);
+  },
   credentials: true
 }));
 app.use(express.json({ limit: '10mb' }));
 app.use(cookieParser());
+
+function getCookieOptions(req) {
+  const isHttps = req.secure || req.headers['x-forwarded-proto'] === 'https' || process.env.VERCEL === '1';
+  return {
+    httpOnly: true,
+    secure: isHttps,
+    sameSite: 'strict',
+    maxAge: 2 * 60 * 60 * 1000 // 2 hours
+  };
+}
 
 // Enforce security headers on all responses
 app.use((req, res, next) => {
@@ -35,6 +59,32 @@ app.use((req, res, next) => {
   res.setHeader('X-XSS-Protection', '1; mode=block');
   res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
   next();
+});
+
+// Serverless-safe lazy DB & seed initialization (cached across warm invocations)
+const seedDefaultUsers = require('./seedData');
+let initPromise = null;
+async function ensureInitialized() {
+  if (!initPromise) {
+    initPromise = (async () => {
+      await db.connect();
+      await seedDefaultUsers();
+    })().catch(err => {
+      initPromise = null;
+      throw err;
+    });
+  }
+  return initPromise;
+}
+
+app.use('/api', async (req, res, next) => {
+  try {
+    await ensureInitialized();
+    next();
+  } catch (err) {
+    console.error('Database initialization error:', err);
+    res.status(500).json({ error: 'Database connection failed.', details: err.message });
+  }
 });
 
 // ==========================================
@@ -91,12 +141,7 @@ app.post('/api/auth/register', async (req, res) => {
     });
 
     const token = pep.generateToken(created);
-    res.cookie('jwt', token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'strict',
-      maxAge: 2 * 60 * 60 * 1000 // 2 hours
-    });
+    res.cookie('jwt', token, getCookieOptions(req));
 
     res.status(201).json({
       message: 'Account created successfully in MongoDB cluster.',
@@ -158,12 +203,7 @@ app.post('/api/auth/login', async (req, res) => {
     });
 
     const token = pep.generateToken(user);
-    res.cookie('jwt', token, {
-      httpOnly: true,
-      secure: false,
-      sameSite: 'strict',
-      maxAge: 2 * 60 * 60 * 1000
-    });
+    res.cookie('jwt', token, getCookieOptions(req));
 
     res.json({
       message: 'Login successful',
@@ -191,7 +231,8 @@ app.post('/api/auth/logout', pep.authenticate, async (req, res) => {
     action: 'USER_LOGOUT',
     outcome: 'SUCCESS'
   });
-  res.clearCookie('jwt');
+  const opts = getCookieOptions(req);
+  res.clearCookie('jwt', { httpOnly: opts.httpOnly, secure: opts.secure, sameSite: opts.sameSite });
   res.json({ message: 'Logged out successfully.' });
 });
 
@@ -267,8 +308,8 @@ app.post('/api/documents/upload', pep.authenticate, upload.single('file'), async
 
     const docId = uuidv4();
 
-    // Save pure ciphertext in physical vault
-    storage.saveEncryptedBlob(docId, req.file.buffer);
+    // Save pure ciphertext in isolated vault storage (MongoDB GridFS or /vault/)
+    await storage.saveEncryptedBlob(docId, req.file.buffer);
 
     const newDoc = {
       id: docId,
@@ -372,7 +413,7 @@ async function pruneExpiredAccess() {
         const remainingHolders = validDEKs.filter(w => !deletedBy.includes(w.userId));
 
         if (remainingHolders.length === 0) {
-          storage.deleteEncryptedBlob(doc.id);
+          await storage.deleteEncryptedBlob(doc.id);
           await db.deleteDoc(doc.id);
           continue; // Document completely purged
         } else {
@@ -412,7 +453,7 @@ async function deleteDocumentForUser(doc, user) {
   const activeHolders = remainingDEKs.filter(w => !deletedBy.includes(w.userId));
 
   if (activeHolders.length === 0) {
-    storage.deleteEncryptedBlob(doc.id);
+    await storage.deleteEncryptedBlob(doc.id);
     await db.deleteDoc(doc.id);
   } else {
     await db.updateDoc(doc.id, {
@@ -438,11 +479,6 @@ async function deleteDocumentForUser(doc, user) {
     }
   });
 }
-
-// Run automatic expiration sweep every 15 seconds
-setInterval(() => {
-  pruneExpiredAccess().catch(() => {});
-}, 15000);
 
 // List Documents Accessible to Current User
 app.get('/api/documents', pep.authenticate, async (req, res) => {
@@ -533,7 +569,7 @@ app.get('/api/documents/:id/metadata', pep.authenticate, pep.enforceDocAccess('r
 // Download Raw Encrypted Ciphertext
 app.get('/api/documents/:id/download', pep.authenticate, pep.enforceDocAccess('read'), async (req, res) => {
   const doc = req.doc;
-  const buffer = storage.getEncryptedBlob(doc.id);
+  const buffer = await storage.getEncryptedBlob(doc.id);
 
   if (!buffer) {
     return res.status(404).json({ error: 'Encrypted ciphertext blob missing from vault volume.' });
@@ -909,18 +945,22 @@ app.get('/api/audit/verify', pep.authenticate, async (req, res) => {
 // ==========================================
 
 // Storage Exposure Test
-app.get('/api/adversarial/inspect-storage/:id', pep.authenticate, (req, res) => {
-  const inspection = storage.inspectBlob(req.params.id);
-  if (!inspection) {
-    return res.status(404).json({ error: 'Blob not found in storage.' });
+app.get('/api/adversarial/inspect-storage/:id', pep.authenticate, async (req, res) => {
+  try {
+    const inspection = await storage.inspectBlob(req.params.id);
+    if (!inspection) {
+      return res.status(404).json({ error: 'Blob not found in storage.' });
+    }
+    res.json(inspection);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
-  res.json(inspection);
 });
 
 // Ciphertext Tampering Test
 app.post('/api/adversarial/tamper-blob/:id', pep.authenticate, async (req, res) => {
   try {
-    const result = storage.tamperBlobBit(req.params.id);
+    const result = await storage.tamperBlobBit(req.params.id);
     await auditChain.recordEvent({
       actorId: req.user.id,
       actorName: req.user.fullName,
@@ -947,27 +987,34 @@ app.post('/api/adversarial/tamper-log', pep.authenticate, pep.requireRole('admin
   }
 });
 
-// Serve Frontend Static Files
-const FRONTEND_DIST = path.resolve(__dirname, '..', 'frontend', 'dist');
-if (require('fs').existsSync(FRONTEND_DIST)) {
-  app.use(express.static(FRONTEND_DIST));
-  app.use((req, res, next) => {
-    if (req.method === 'GET' && !req.path.startsWith('/api')) {
-      return res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
-    }
-    next();
+// Serve Frontend Static Files (Local / Traditional Node Server)
+if (!process.env.VERCEL) {
+  const FRONTEND_DIST = path.resolve(__dirname, '..', 'frontend', 'dist');
+  if (require('fs').existsSync(FRONTEND_DIST)) {
+    app.use(express.static(FRONTEND_DIST));
+    app.use((req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api')) {
+        return res.sendFile(path.join(FRONTEND_DIST, 'index.html'));
+      }
+      next();
+    });
+  }
+}
+
+// Start standalone server only when executed directly (not imported by Vercel Serverless)
+if (require.main === module && !process.env.VERCEL) {
+  setInterval(() => {
+    pruneExpiredAccess().catch(() => {});
+  }, 15000);
+
+  ensureInitialized().then(() => {
+    app.listen(PORT, () => {
+      console.log(`Vaultora Secure Backend listening on port ${PORT}`);
+      console.log(`Storage backend: ${db.isUsingMongoose() ? 'MongoDB GridFS (vault_blobs)' : path.resolve(__dirname, '..', 'vault')}`);
+    });
+  }).catch(err => {
+    console.error('Failed to initialize database:', err);
   });
 }
 
-// Start Server and Connect DB
-const seedDefaultUsers = require('./seedData');
-
-db.connect().then(async () => {
-  await seedDefaultUsers();
-  app.listen(PORT, () => {
-    console.log(`Vaultora Secure Backend listening on port ${PORT}`);
-    console.log(`Storage volume mounted at: ${path.resolve(__dirname, '..', 'vault')}`);
-  });
-}).catch(err => {
-  console.error('Failed to initialize database:', err);
-});
+module.exports = app;

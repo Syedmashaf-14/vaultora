@@ -3,17 +3,22 @@ const fs = require('fs');
 const path = require('path');
 const mongoose = require('mongoose');
 
-const DATA_DIR = path.join(__dirname, 'data');
+const DATA_DIR = process.env.VERCEL
+  ? '/tmp/vaultora_data'
+  : path.join(__dirname, 'data');
 const USERS_FILE = path.join(DATA_DIR, 'users.json');
 const DOCS_FILE = path.join(DATA_DIR, 'documents.json');
 const AUDIT_FILE = path.join(DATA_DIR, 'audit_logs.json');
 
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
+function ensureDataDir() {
+  if (!fs.existsSync(DATA_DIR)) {
+    fs.mkdirSync(DATA_DIR, { recursive: true });
+  }
 }
 
 function readJSON(filePath, defaultValue = []) {
   try {
+    ensureDataDir();
     if (!fs.existsSync(filePath)) {
       fs.writeFileSync(filePath, JSON.stringify(defaultValue, null, 2), 'utf-8');
       return defaultValue;
@@ -25,6 +30,7 @@ function readJSON(filePath, defaultValue = []) {
 }
 
 function writeJSON(filePath, data) {
+  ensureDataDir();
   const tmp = `${filePath}.tmp`;
   fs.writeFileSync(tmp, JSON.stringify(data, null, 2), 'utf-8');
   fs.renameSync(tmp, filePath);
@@ -91,41 +97,72 @@ let UserModel;
 let DocumentModel;
 let AuditLogModel;
 let usingMongoose = false;
+let connectPromise = null;
+
+function registerModels() {
+  UserModel = mongoose.models.User || mongoose.model('User', UserSchema);
+  DocumentModel = mongoose.models.Document || mongoose.model('Document', DocumentSchema);
+  AuditLogModel = mongoose.models.AuditLog || mongoose.model('AuditLog', AuditLogSchema);
+}
 
 async function connectDB() {
-  const envUri = process.env.MONGODB_URI?.trim();
-  if (envUri) {
-    try {
-      console.log(`Attempting connection to MongoDB Cluster...`);
-      await mongoose.connect(envUri, { serverSelectionTimeoutMS: 5000 });
-      UserModel = mongoose.models.User || mongoose.model('User', UserSchema);
-      DocumentModel = mongoose.models.Document || mongoose.model('Document', DocumentSchema);
-      AuditLogModel = mongoose.models.AuditLog || mongoose.model('AuditLog', AuditLogSchema);
-      usingMongoose = true;
-      console.log('✓ Successfully connected to MongoDB Cluster.');
-      return;
-    } catch (err) {
-      console.warn('Could not connect to external MONGODB_URI:', err.message);
-    }
+  if (usingMongoose && mongoose.connection.readyState === 1) {
+    registerModels();
+    return;
   }
 
-  // Try local MongoDB on 27017
+  if (connectPromise) {
+    return connectPromise;
+  }
+
+  connectPromise = (async () => {
+    const envUri = process.env.MONGODB_URI?.trim();
+    if (envUri) {
+      try {
+        console.log(`Attempting connection to MongoDB Cluster...`);
+        await mongoose.connect(envUri, { serverSelectionTimeoutMS: 5000 });
+        registerModels();
+        usingMongoose = true;
+        console.log('✓ Successfully connected to MongoDB Cluster.');
+        return;
+      } catch (err) {
+        console.warn('Could not connect to external MONGODB_URI:', err.message);
+        if (process.env.VERCEL) {
+          throw new Error(`MongoDB connection failed on Vercel: ${err.message}`);
+        }
+      }
+    } else if (process.env.VERCEL) {
+      throw new Error('MONGODB_URI environment variable is required when running on Vercel.');
+    }
+
+    // Try local MongoDB on 27017 (local dev only)
+    try {
+      await mongoose.connect('mongodb://127.0.0.1:27017/vaultora', { serverSelectionTimeoutMS: 1500 });
+      registerModels();
+      usingMongoose = true;
+      console.log('✓ Connected to local MongoDB instance on port 27017.');
+      return;
+    } catch {
+      console.log('ℹ Local MongoDB daemon not running. Active in high-performance local document store mode.');
+      usingMongoose = false;
+    }
+  })();
+
   try {
-    await mongoose.connect('mongodb://127.0.0.1:27017/vaultora', { serverSelectionTimeoutMS: 1500 });
-    UserModel = mongoose.models.User || mongoose.model('User', UserSchema);
-    DocumentModel = mongoose.models.Document || mongoose.model('Document', DocumentSchema);
-    AuditLogModel = mongoose.models.AuditLog || mongoose.model('AuditLog', AuditLogSchema);
-    usingMongoose = true;
-    console.log('✓ Connected to local MongoDB instance on port 27017.');
-    return;
-  } catch {
-    console.log('ℹ Local MongoDB daemon not running. Active in high-performance local document store mode.');
-    usingMongoose = false;
+    await connectPromise;
+  } finally {
+    connectPromise = null;
   }
 }
 
 const db = {
   connect: connectDB,
+  isUsingMongoose() {
+    return usingMongoose && mongoose.connection.readyState === 1 && !!mongoose.connection.db;
+  },
+  getMongoDb() {
+    return mongoose.connection.db;
+  },
 
   // Users
   async getUsers() {
