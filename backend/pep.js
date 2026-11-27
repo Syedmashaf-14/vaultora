@@ -172,6 +172,7 @@ const pep = {
             req.userWrappedDEK = aclEntry.wrappedKey;
             return next();
           } else {
+            const actionLabel = requiredPermission === 'share' ? 'share or delegate access to other users' : requiredPermission;
             await auditChain.recordEvent({
               actorId: req.user.id,
               actorName: req.user.fullName,
@@ -183,7 +184,7 @@ const pep = {
               details: { requiredPermission, userPerm }
             });
             return res.status(403).json({
-              error: `Permission Denied: You have '${userPerm}' access, but '${requiredPermission}' is required.`
+              error: `Access Denied (DAC Policy): You have '${userPerm}' privilege (Read & Decrypt only). You are not authorized to ${actionLabel}.`
             });
           }
         }

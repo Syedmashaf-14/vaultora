@@ -550,8 +550,39 @@ export default function App() {
 
       showToast(`Access for ${recipientName} revoked. Immediate server enforcement active.`, 'success');
       await loadDashboardData();
+      setSelectedDoc(prev => {
+        if (!prev || prev.id !== docId) return prev;
+        const updatedUsers = (prev.sharedUsers || []).filter(u => u.userId !== recipientId);
+        return { ...prev, sharedUsers: updatedUsers };
+      });
     } catch (err) {
       showToast(`Revocation error: ${err.message}`, 'error');
+    }
+  };
+
+  // 7b. Update Collaborator Permission Level (Owner only)
+  const handleChangePermission = async (docId, recipientId, permission) => {
+    try {
+      const res = await fetch(`/api/documents/${docId}/permission`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recipientId, permission })
+      });
+      if (!res.ok) {
+        const err = await res.json();
+        throw new Error(err.error || 'Failed to update permission');
+      }
+      showToast(`Updated permission to ${permission}.`, 'success');
+      await loadDashboardData();
+      setSelectedDoc(prev => {
+        if (!prev || prev.id !== docId) return prev;
+        const updatedUsers = (prev.sharedUsers || []).map(u =>
+          u.userId === recipientId ? { ...u, permission } : u
+        );
+        return { ...prev, sharedUsers: updatedUsers };
+      });
+    } catch (err) {
+      showToast(`Permission update error: ${err.message}`, 'error');
     }
   };
 
@@ -1406,6 +1437,7 @@ export default function App() {
                     <tr>
                       <th className="py-3 px-5">Name</th>
                       <th className="py-3 px-4">Owner</th>
+                      <th className="py-3 px-4">Your Privilege</th>
                       <th className="py-3 px-4">Modified</th>
                       <th className="py-3 px-4">Sharing</th>
                       <th className="py-3 px-4 text-right">Actions</th>
@@ -1414,7 +1446,7 @@ export default function App() {
                   <tbody className="divide-y divide-slate-100">
                     {filteredDocs.length === 0 ? (
                       <tr>
-                        <td colSpan="5" className="py-12 text-center text-slate-400">
+                        <td colSpan="6" className="py-12 text-center text-slate-400">
                           {activeTab === 'starred' && (
                             <>
                               <Star className="w-8 h-8 mx-auto mb-2 text-amber-300" />
@@ -1504,6 +1536,26 @@ export default function App() {
                             {doc.isOwner ? 'You' : doc.ownerName}
                           </td>
 
+                          {/* Your Privilege / Access Level */}
+                          <td className="py-3 px-4">
+                            {doc.isOwner ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                                <Shield className="w-3 h-3 text-blue-600" />
+                                Owner (Full)
+                              </span>
+                            ) : doc.myPermission === 'editor' ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
+                                <CheckCircle2 className="w-3 h-3 text-emerald-600" />
+                                Editor (Read/Share)
+                              </span>
+                            ) : (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[10px] font-bold bg-amber-50 text-amber-800 border border-amber-200">
+                                <Lock className="w-3 h-3 text-amber-600" />
+                                Viewer (Read & Decrypt only)
+                              </span>
+                            )}
+                          </td>
+
                           {/* Modified */}
                           <td className="py-3 px-4 text-slate-400 text-[11px]">
                             {new Date(doc.updatedAt || doc.createdAt).toLocaleDateString('en-US', {
@@ -1565,90 +1617,110 @@ export default function App() {
                                   <MoreVertical className="w-4 h-4" />
                                 </button>
 
-                                {/* Dropdown Menu */}
+                                {/* Dropdown Menu with Strict Discretionary Access Control (DAC) */}
                                 {activeMenuDocId === doc.id && (
                                   <div
                                     onMouseLeave={() => setActiveMenuDocId(null)}
-                                    className="absolute right-4 top-10 w-52 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-20 text-left text-xs"
+                                    className="absolute right-4 top-10 w-56 bg-white rounded-xl shadow-xl border border-slate-200 py-1.5 z-20 text-left text-xs divide-y divide-slate-100"
                                   >
-                                    <button
-                                      onClick={() => {
-                                        setActiveMenuDocId(null);
-                                        handleDownloadAndDecrypt(doc);
-                                      }}
-                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
-                                    >
-                                      <Download className="w-3.5 h-3.5 text-blue-600" />
-                                      <span>Download & Decrypt</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => {
-                                        setActiveMenuDocId(null);
-                                        setSelectedDoc(doc);
-                                        setShowShareModal(true);
-                                      }}
-                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
-                                    >
-                                      <Share2 className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>Share with User (Wrap DEK)</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => {
-                                        setActiveMenuDocId(null);
-                                        handleToggleStar(doc);
-                                      }}
-                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-amber-50 hover:text-amber-700 cursor-pointer"
-                                    >
-                                      <Star className="w-3.5 h-3.5 text-amber-500" />
-                                      <span>{doc.isStarred ? 'Remove from Starred' : 'Add to Starred'}</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => {
-                                        setActiveMenuDocId(null);
-                                        handleToggleArchive(doc);
-                                      }}
-                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-purple-50 hover:text-purple-700 cursor-pointer"
-                                    >
-                                      <Archive className="w-3.5 h-3.5 text-purple-500" />
-                                      <span>{doc.isArchived ? 'Unarchive Document' : 'Move to Archive'}</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => {
-                                        setActiveMenuDocId(null);
-                                        handleInspectStorage(doc.id);
-                                      }}
-                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
-                                    >
-                                      <Eye className="w-3.5 h-3.5 text-slate-400" />
-                                      <span>Inspect Vault Disk Blob</span>
-                                    </button>
-
-                                    <button
-                                      onClick={() => {
-                                        setActiveMenuDocId(null);
-                                        handleSimulateBitFlip(doc.id);
-                                      }}
-                                      className="w-full flex items-center gap-2 px-3.5 py-2 text-amber-600 hover:bg-amber-50 cursor-pointer"
-                                    >
-                                      <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
-                                      <span>Simulate Bit-Flip Tamper</span>
-                                    </button>
-
-                                    {doc.isOwner && (
+                                    <div className="py-1">
+                                      {/* 1. Download & Decrypt - Always Allowed for Authorized ACL Users */}
                                       <button
                                         onClick={() => {
                                           setActiveMenuDocId(null);
-                                          handleMoveToTrash(doc);
+                                          handleDownloadAndDecrypt(doc);
                                         }}
-                                        className="w-full flex items-center gap-2 px-3.5 py-2 text-rose-600 hover:bg-rose-50 border-t border-slate-100 cursor-pointer"
+                                        className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-blue-50 hover:text-blue-600 cursor-pointer"
                                       >
-                                        <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                                        <span>Move to Trash</span>
+                                        <Download className="w-3.5 h-3.5 text-blue-600" />
+                                        <span>Download & Decrypt</span>
                                       </button>
+
+                                      {/* 2. Share with User - Strictly Restricted for Viewers! */}
+                                      {doc.isOwner || doc.myPermission === 'editor' ? (
+                                        <button
+                                          onClick={() => {
+                                            setActiveMenuDocId(null);
+                                            setSelectedDoc(doc);
+                                            setShowShareModal(true);
+                                          }}
+                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                        >
+                                          <Share2 className="w-3.5 h-3.5 text-slate-400" />
+                                          <span>Share / Manage Access (Wrap DEK)</span>
+                                        </button>
+                                      ) : (
+                                        <div className="px-3.5 py-1.5 text-[10px] text-amber-700 bg-amber-50/90 flex items-center gap-1.5">
+                                          <Lock className="w-3 h-3 text-amber-600 shrink-0" />
+                                          <span>Viewer: Sharing restricted (Read only)</span>
+                                        </div>
+                                      )}
+
+                                      {/* 3. Star / Bookmark */}
+                                      <button
+                                        onClick={() => {
+                                          setActiveMenuDocId(null);
+                                          handleToggleStar(doc);
+                                        }}
+                                        className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-amber-50 hover:text-amber-700 cursor-pointer"
+                                      >
+                                        <Star className="w-3.5 h-3.5 text-amber-500" />
+                                        <span>{doc.isStarred ? 'Remove from Starred' : 'Add to Starred'}</span>
+                                      </button>
+                                    </div>
+
+                                    {/* 4. Edit / Archive Privileges - Owner or Editor only */}
+                                    {(doc.isOwner || doc.myPermission === 'editor') && (
+                                      <div className="py-1">
+                                        <button
+                                          onClick={() => {
+                                            setActiveMenuDocId(null);
+                                            handleToggleArchive(doc);
+                                          }}
+                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-purple-50 hover:text-purple-700 cursor-pointer"
+                                        >
+                                          <Archive className="w-3.5 h-3.5 text-purple-500" />
+                                          <span>{doc.isArchived ? 'Unarchive Document' : 'Move to Archive'}</span>
+                                        </button>
+                                      </div>
+                                    )}
+
+                                    {/* 5. Owner-Only Administration & Adversarial Actions */}
+                                    {doc.isOwner && (
+                                      <div className="py-1">
+                                        <button
+                                          onClick={() => {
+                                            setActiveMenuDocId(null);
+                                            handleInspectStorage(doc.id);
+                                          }}
+                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
+                                        >
+                                          <Eye className="w-3.5 h-3.5 text-slate-400" />
+                                          <span>Inspect Vault Disk Blob</span>
+                                        </button>
+
+                                        <button
+                                          onClick={() => {
+                                            setActiveMenuDocId(null);
+                                            handleSimulateBitFlip(doc.id);
+                                          }}
+                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-amber-600 hover:bg-amber-50 cursor-pointer"
+                                        >
+                                          <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
+                                          <span>Simulate Bit-Flip Tamper</span>
+                                        </button>
+
+                                        <button
+                                          onClick={() => {
+                                            setActiveMenuDocId(null);
+                                            handleMoveToTrash(doc);
+                                          }}
+                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-rose-600 hover:bg-rose-50 cursor-pointer"
+                                        >
+                                          <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                                          <span>Move to Trash</span>
+                                        </button>
+                                      </div>
                                     )}
                                   </div>
                                 )}
@@ -1842,89 +1914,187 @@ export default function App() {
         </div>
       )}
 
-      {/* 4. Share Modal */}
+      {/* 4. Share & Access Control List (ACL) Modal */}
       {showShareModal && selectedDoc && (
         <div className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 z-50">
-          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200">
-            <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+          <div className="bg-white rounded-2xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 max-h-[90vh] flex flex-col">
+            <div className="flex items-center justify-between pb-4 border-b border-slate-100 shrink-0">
               <div className="flex items-center gap-2 text-slate-900 font-bold text-base">
                 <Share2 className="w-5 h-5 text-blue-600" />
-                <span>Share "{selectedDoc.originalName}"</span>
+                <span>Access Control & Sharing: "{selectedDoc.originalName}"</span>
               </div>
               <button onClick={() => setShowShareModal(false)} className="text-slate-400 hover:text-slate-600 cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
-            <form onSubmit={handleShareDocument} className="mt-4 space-y-4 text-xs">
+            <div className="flex-1 overflow-y-auto py-4 space-y-5 text-xs">
+              {/* Section 1: Active Collaborators in ACL */}
               <div>
-                <label className="block text-slate-700 font-semibold mb-1">Select Registered MongoDB Recipient</label>
-                {allUsers.filter(u => u.id !== currentUser.id).length === 0 ? (
-                  <div className="p-3 bg-amber-50 border border-amber-200 rounded-xl text-amber-700 text-xs">
-                    No other users registered in MongoDB yet. Register another account from the login screen to test cross-user sharing.
+                <h4 className="font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                  <ShieldCheck className="w-4 h-4 text-emerald-600" />
+                  <span>Document Access Control List (ACL)</span>
+                </h4>
+                <p className="text-[11px] text-slate-400 mb-2.5">
+                  Accounts with wrapped AES keys stored in MongoDB:
+                </p>
+
+                <div className="divide-y divide-slate-100 border border-slate-200 rounded-xl overflow-hidden bg-slate-50/50">
+                  {/* Owner Row */}
+                  <div className="p-3 flex items-center justify-between bg-white">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center font-bold text-xs">
+                        {selectedDoc.ownerName ? selectedDoc.ownerName[0] : 'O'}
+                      </div>
+                      <div>
+                        <div className="font-semibold text-slate-800">{selectedDoc.ownerName}</div>
+                        <div className="text-[10px] text-slate-400">Document Owner • Full Access</div>
+                      </div>
+                    </div>
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-blue-50 text-blue-700 border border-blue-200">
+                      Owner
+                    </span>
                   </div>
-                ) : (
-                  <select
-                    value={shareRecipientId}
-                    onChange={(e) => setShareRecipientId(e.target.value)}
-                    className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+
+                  {/* Collaborator Rows */}
+                  {(selectedDoc.sharedUsers || [])
+                    .filter(u => u.userId !== selectedDoc.ownerId)
+                    .map((collab) => (
+                      <div key={collab.userId} className="p-3 flex items-center justify-between bg-white hover:bg-slate-50 transition-colors">
+                        <div className="flex items-center gap-2.5">
+                          <div className={`w-7 h-7 rounded-lg flex items-center justify-center font-bold text-xs text-white ${
+                            collab.permission === 'editor' ? 'bg-emerald-500' : 'bg-amber-500'
+                          }`}>
+                            {collab.userName ? collab.userName[0] : 'U'}
+                          </div>
+                          <div>
+                            <div className="font-semibold text-slate-800">{collab.userName}</div>
+                            <div className="text-[10px] text-slate-400">
+                              {collab.permission === 'editor' ? 'Editor (Read/Write/Share)' : 'Viewer (Read & Decrypt only)'}
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {selectedDoc.isOwner ? (
+                            <select
+                              value={collab.permission}
+                              onChange={(e) => handleChangePermission(selectedDoc.id, collab.userId, e.target.value)}
+                              className="bg-white border border-slate-200 rounded-lg px-2 py-1 text-[11px] font-medium text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500"
+                            >
+                              <option value="viewer">Viewer (Read only)</option>
+                              <option value="editor">Editor (Can share)</option>
+                            </select>
+                          ) : (
+                            <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                              collab.permission === 'editor'
+                                ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                : 'bg-amber-50 text-amber-700 border border-amber-200'
+                            }`}>
+                              {collab.permission.toUpperCase()}
+                            </span>
+                          )}
+
+                          {selectedDoc.isOwner && (
+                            <button
+                              type="button"
+                              onClick={() => handleRevokeAccess(selectedDoc.id, collab.userId, collab.userName)}
+                              title="Revoke access"
+                              className="p-1 text-rose-500 hover:bg-rose-50 rounded-md transition-colors cursor-pointer"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+
+                  {(selectedDoc.sharedUsers || []).filter(u => u.userId !== selectedDoc.ownerId).length === 0 && (
+                    <div className="p-3 text-center text-slate-400 text-[11px]">
+                      Not yet shared with other users.
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              {/* Section 2: Grant Access to a New User Form */}
+              <form onSubmit={handleShareDocument} className="pt-3 border-t border-slate-100 space-y-4">
+                <h4 className="font-semibold text-slate-700 flex items-center gap-1.5">
+                  <Plus className="w-4 h-4 text-blue-600" />
+                  <span>Grant Access to Another User</span>
+                </h4>
+
+                <div>
+                  <label className="block text-slate-700 font-semibold mb-1">Select Registered Recipient</label>
+                  {allUsers.filter(u => u.id !== currentUser.id && u.id !== selectedDoc.ownerId).length === 0 ? (
+                    <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl text-slate-500 text-xs text-center">
+                      All other users already have access or no other registered accounts exist.
+                    </div>
+                  ) : (
+                    <select
+                      value={shareRecipientId}
+                      onChange={(e) => setShareRecipientId(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      {allUsers
+                        .filter(u => u.id !== currentUser.id && u.id !== selectedDoc.ownerId)
+                        .map(u => (
+                          <option key={u.id} value={u.id}>
+                            {u.fullName} ({u.role}) - @{u.username}
+                          </option>
+                        ))}
+                    </select>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">Permission Level</label>
+                    <select
+                      value={sharePermission}
+                      onChange={(e) => setSharePermission(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="viewer">Viewer (Read & Decrypt only)</option>
+                      <option value="editor">Editor (Read, Decrypt & Share)</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label className="block text-slate-700 font-semibold mb-1">
+                      Access Expiration
+                    </label>
+                    <select
+                      value={shareExpiryHours}
+                      onChange={(e) => setShareExpiryHours(e.target.value)}
+                      className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    >
+                      <option value="">Never Expires</option>
+                      <option value="1">1 Hour</option>
+                      <option value="24">24 Hours</option>
+                      <option value="168">7 Days</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-3 pt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowShareModal(false)}
+                    className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl font-medium cursor-pointer"
                   >
-                    {allUsers
-                      .filter(u => u.id !== currentUser.id)
-                      .map(u => (
-                        <option key={u.id} value={u.id}>
-                          {u.fullName} ({u.role}) - @{u.username}
-                        </option>
-                      ))}
-                  </select>
-                )}
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">Permission Level</label>
-                <select
-                  value={sharePermission}
-                  onChange={(e) => setSharePermission(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="viewer">Viewer (Read & Decrypt only)</option>
-                  <option value="editor">Editor (Read, Decrypt & Share)</option>
-                </select>
-              </div>
-
-              <div>
-                <label className="block text-slate-700 font-semibold mb-1">
-                  Access Expiration (Temporal Least Privilege)
-                </label>
-                <select
-                  value={shareExpiryHours}
-                  onChange={(e) => setShareExpiryHours(e.target.value)}
-                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
-                >
-                  <option value="">Never Expires</option>
-                  <option value="1">1 Hour</option>
-                  <option value="24">24 Hours</option>
-                  <option value="168">7 Days</option>
-                </select>
-              </div>
-
-              <div className="flex justify-end gap-3 pt-3">
-                <button
-                  type="button"
-                  onClick={() => setShowShareModal(false)}
-                  className="px-4 py-2 text-slate-600 hover:bg-slate-100 rounded-xl font-medium cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={allUsers.filter(u => u.id !== currentUser.id).length === 0}
-                  className="px-5 py-2 text-white bg-blue-600 hover:bg-blue-700 rounded-xl font-semibold shadow-xs disabled:opacity-50 cursor-pointer"
-                >
-                  Wrap DEK & Grant Access
-                </button>
-              </div>
-            </form>
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={allUsers.filter(u => u.id !== currentUser.id && u.id !== selectedDoc.ownerId).length === 0}
+                    className="px-5 py-2 text-white bg-blue-600 hover:bg-blue-700 rounded-xl font-semibold shadow-xs disabled:opacity-50 cursor-pointer"
+                  >
+                    Wrap DEK & Grant Access
+                  </button>
+                </div>
+              </form>
+            </div>
           </div>
         </div>
       )}

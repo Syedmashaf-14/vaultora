@@ -449,12 +449,17 @@ app.post('/api/documents/:id/share', pep.authenticate, pep.enforceDocAccess('sha
       return res.status(400).json({ error: 'Recipient ID and wrapped DEK are required.' });
     }
 
+    const doc = req.doc;
+
+    if (recipientId === doc.ownerId) {
+      return res.status(400).json({ error: 'Cannot modify owner permissions in ACL.' });
+    }
+
     const recipient = await db.findUserById(recipientId);
     if (!recipient) {
       return res.status(404).json({ error: 'Recipient user not found.' });
     }
 
-    const doc = req.doc;
     const existingIndex = doc.wrappedDEKs.findIndex(w => w.userId === recipientId);
 
     const aclEntry = {
@@ -539,6 +544,41 @@ app.post('/api/documents/:id/revoke', pep.authenticate, pep.enforceDocAccess('re
   } catch (err) {
     console.error('Revoke error:', err);
     res.status(500).json({ error: 'Failed to revoke access.', details: err.message });
+  }
+});
+
+// Update Collaborator Permission Level (Owner Only)
+app.post('/api/documents/:id/permission', pep.authenticate, pep.enforceDocAccess('revoke'), async (req, res) => {
+  try {
+    const { recipientId, permission } = req.body;
+    if (!recipientId || !['editor', 'viewer'].includes(permission)) {
+      return res.status(400).json({ error: 'Valid recipient ID and permission (editor or viewer) are required.' });
+    }
+    const doc = req.doc;
+    const aclIndex = doc.wrappedDEKs.findIndex(w => w.userId === recipientId);
+    if (aclIndex === -1) {
+      return res.status(404).json({ error: 'Recipient is not in document ACL.' });
+    }
+    doc.wrappedDEKs[aclIndex].permission = permission;
+    const updated = await db.updateDoc(doc.id, { wrappedDEKs: doc.wrappedDEKs });
+
+    await auditChain.recordEvent({
+      actorId: req.user.id,
+      actorName: req.user.fullName,
+      actorRole: req.user.role,
+      action: 'PERMISSION_UPDATED',
+      targetDocId: doc.id,
+      targetDocName: doc.originalName,
+      outcome: 'SUCCESS',
+      details: {
+        recipientId,
+        newPermission: permission
+      }
+    });
+
+    res.json({ message: `Updated permission to ${permission}.`, document: updated });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
