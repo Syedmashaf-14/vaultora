@@ -94,7 +94,8 @@ export default function App() {
   // Share State
   const [shareRecipientId, setShareRecipientId] = useState('');
   const [sharePermission, setSharePermission] = useState('viewer');
-  const [shareExpiryHours, setShareExpiryHours] = useState('');
+  const [shareExpiryMinutes, setShareExpiryMinutes] = useState('');
+  const [nowTick, setNowTick] = useState(Date.now());
 
   const showToast = (message, type = 'info') => {
     setNotification({ message, type });
@@ -105,6 +106,30 @@ export default function App() {
   useEffect(() => {
     checkSession();
   }, []);
+
+  // Live countdown & automatic deletion monitor for temporary shared documents
+  useEffect(() => {
+    if (!currentUser) return;
+    const hasExpiring = documents.some(d => !d.isOwner && d.expiresAt);
+    if (!hasExpiring) return;
+
+    const interval = setInterval(() => {
+      const now = Date.now();
+      setNowTick(now);
+      const justExpired = documents.find(
+        d => !d.isOwner && d.expiresAt && now >= new Date(d.expiresAt).getTime()
+      );
+      if (justExpired) {
+        showToast(
+          `Temporary access to "${justExpired.originalName}" has expired and was automatically removed.`,
+          'warning'
+        );
+        loadDashboardData();
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, [documents, currentUser]);
 
   const checkSession = async () => {
     try {
@@ -497,9 +522,9 @@ export default function App() {
       const recipientWrappedDEK = await wrapDEKForRecipient(rawDEK, recipient.publicKeyPem);
 
       let expiresAt = null;
-      if (shareExpiryHours && !isNaN(shareExpiryHours)) {
+      if (shareExpiryMinutes && !isNaN(shareExpiryMinutes)) {
         const d = new Date();
-        d.setHours(d.getHours() + parseFloat(shareExpiryHours));
+        d.setMinutes(d.getMinutes() + parseFloat(shareExpiryMinutes));
         expiresAt = d.toISOString();
       }
 
@@ -750,6 +775,21 @@ export default function App() {
     const sizes = ['B', 'KB', 'MB', 'GB'];
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + sizes[i];
+  };
+
+  const formatTimeRemaining = (expiresAt, nowMs) => {
+    if (!expiresAt) return null;
+    const diff = new Date(expiresAt).getTime() - nowMs;
+    if (diff <= 0) return 'Expired';
+    const totalSecs = Math.floor(diff / 1000);
+    const days = Math.floor(totalSecs / 86400);
+    const hrs = Math.floor((totalSecs % 86400) / 3600);
+    const mins = Math.floor((totalSecs % 3600) / 60);
+    const secs = totalSecs % 60;
+    if (days > 0) return `${days}d ${hrs}h left`;
+    if (hrs > 0) return `${hrs}h ${mins}m left`;
+    if (mins > 0) return `${mins}m ${secs}s left`;
+    return `${secs}s left`;
   };
 
   const getFileIcon = (type) => {
@@ -1511,7 +1551,7 @@ export default function App() {
                               )}
                               {getFileIcon(doc.fileType)}
                               <div>
-                                <div className="font-semibold text-slate-800 text-xs group-hover:text-blue-600 transition-colors flex items-center gap-2">
+                                <div className="font-semibold text-slate-800 text-xs group-hover:text-blue-600 transition-colors flex items-center gap-2 flex-wrap">
                                   <span>{doc.originalName}</span>
                                   {doc.isArchived && (
                                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-purple-100 text-purple-700 font-bold uppercase tracking-wider">
@@ -1521,6 +1561,12 @@ export default function App() {
                                   {doc.isTrashed && (
                                     <span className="text-[9px] px-1.5 py-0.5 rounded bg-rose-100 text-rose-700 font-bold uppercase tracking-wider">
                                       In Trash
+                                    </span>
+                                  )}
+                                  {!doc.isOwner && doc.expiresAt && (
+                                    <span className="inline-flex items-center gap-1 text-[9px] px-1.5 py-0.5 rounded bg-rose-50 text-rose-700 border border-rose-200 font-bold">
+                                      <Clock className="w-2.5 h-2.5" />
+                                      Auto-Deletes: {formatTimeRemaining(doc.expiresAt, nowTick)}
                                     </span>
                                   )}
                                 </div>
@@ -1598,15 +1644,13 @@ export default function App() {
                                 >
                                   Restore
                                 </button>
-                                {doc.isOwner && (
-                                  <button
-                                    onClick={() => handlePermanentDelete(doc)}
-                                    className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-                                    title="Permanently Purge"
-                                  >
-                                    <Trash2 className="w-4 h-4" />
-                                  </button>
-                                )}
+                                <button
+                                  onClick={() => handlePermanentDelete(doc)}
+                                  className="p-1.5 text-rose-500 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
+                                  title="Permanently Delete Your Copy"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
                               </div>
                             ) : (
                               <>
@@ -1642,6 +1686,12 @@ export default function App() {
                                           onClick={() => {
                                             setActiveMenuDocId(null);
                                             setSelectedDoc(doc);
+                                            const eligible = allUsers.filter(
+                                              u => u.id !== currentUser?.id && u.id !== doc.ownerId
+                                            );
+                                            if (eligible.length > 0) {
+                                              setShareRecipientId(eligible[0].id);
+                                            }
                                             setShowShareModal(true);
                                           }}
                                           className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-slate-50 cursor-pointer"
@@ -1669,23 +1719,32 @@ export default function App() {
                                       </button>
                                     </div>
 
-                                    {/* 4. Edit / Archive Privileges - Owner or Editor only */}
-                                    {(doc.isOwner || doc.myPermission === 'editor') && (
-                                      <div className="py-1">
-                                        <button
-                                          onClick={() => {
-                                            setActiveMenuDocId(null);
-                                            handleToggleArchive(doc);
-                                          }}
-                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-purple-50 hover:text-purple-700 cursor-pointer"
-                                        >
-                                          <Archive className="w-3.5 h-3.5 text-purple-500" />
-                                          <span>{doc.isArchived ? 'Unarchive Document' : 'Move to Archive'}</span>
-                                        </button>
-                                      </div>
-                                    )}
+                                    {/* 4. Personal Workspace Management (Archive & Trash for your own view) */}
+                                    <div className="py-1">
+                                      <button
+                                        onClick={() => {
+                                          setActiveMenuDocId(null);
+                                          handleToggleArchive(doc);
+                                        }}
+                                        className="w-full flex items-center gap-2 px-3.5 py-2 text-slate-700 hover:bg-purple-50 hover:text-purple-700 cursor-pointer"
+                                      >
+                                        <Archive className="w-3.5 h-3.5 text-purple-500" />
+                                        <span>{doc.isArchived ? 'Unarchive Document' : 'Move to Archive'}</span>
+                                      </button>
 
-                                    {/* 5. Owner-Only Administration & Adversarial Actions */}
+                                      <button
+                                        onClick={() => {
+                                          setActiveMenuDocId(null);
+                                          handleMoveToTrash(doc);
+                                        }}
+                                        className="w-full flex items-center gap-2 px-3.5 py-2 text-rose-600 hover:bg-rose-50 cursor-pointer"
+                                      >
+                                        <Trash2 className="w-3.5 h-3.5 text-rose-500" />
+                                        <span>Move to Trash</span>
+                                      </button>
+                                    </div>
+
+                                    {/* 5. Owner-Only Adversarial & Storage Inspection */}
                                     {doc.isOwner && (
                                       <div className="py-1">
                                         <button
@@ -1708,17 +1767,6 @@ export default function App() {
                                         >
                                           <AlertTriangle className="w-3.5 h-3.5 text-amber-500" />
                                           <span>Simulate Bit-Flip Tamper</span>
-                                        </button>
-
-                                        <button
-                                          onClick={() => {
-                                            setActiveMenuDocId(null);
-                                            handleMoveToTrash(doc);
-                                          }}
-                                          className="w-full flex items-center gap-2 px-3.5 py-2 text-rose-600 hover:bg-rose-50 cursor-pointer"
-                                        >
-                                          <Trash2 className="w-3.5 h-3.5 text-rose-500" />
-                                          <span>Move to Trash</span>
                                         </button>
                                       </div>
                                     )}
@@ -1969,8 +2017,16 @@ export default function App() {
                           </div>
                           <div>
                             <div className="font-semibold text-slate-800">{collab.userName}</div>
-                            <div className="text-[10px] text-slate-400">
-                              {collab.permission === 'editor' ? 'Editor (Read/Write/Share)' : 'Viewer (Read & Decrypt only)'}
+                            <div className="text-[10px] text-slate-400 flex items-center gap-1.5">
+                              <span>{collab.permission === 'editor' ? 'Editor (Read/Write/Share)' : 'Viewer (Read & Decrypt only)'}</span>
+                              <span>•</span>
+                              {collab.expiresAt ? (
+                                <span className="text-rose-600 font-semibold">
+                                  Temp ({formatTimeRemaining(collab.expiresAt, nowTick)})
+                                </span>
+                              ) : (
+                                <span className="text-emerald-600 font-semibold">Permanent</span>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -2062,17 +2118,18 @@ export default function App() {
 
                   <div>
                     <label className="block text-slate-700 font-semibold mb-1">
-                      Access Expiration
+                      Access Duration (Auto-Deletes on Expiry)
                     </label>
                     <select
-                      value={shareExpiryHours}
-                      onChange={(e) => setShareExpiryHours(e.target.value)}
+                      value={shareExpiryMinutes}
+                      onChange={(e) => setShareExpiryMinutes(e.target.value)}
                       className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-slate-800 focus:outline-none focus:ring-2 focus:ring-blue-500"
                     >
-                      <option value="">Never Expires</option>
-                      <option value="1">1 Hour</option>
-                      <option value="24">24 Hours</option>
-                      <option value="168">7 Days</option>
+                      <option value="">Permanent (Never Expires)</option>
+                      <option value="2">2 Minutes (Testing Auto-Delete)</option>
+                      <option value="60">1 Hour</option>
+                      <option value="1440">24 Hours</option>
+                      <option value="10080">7 Days</option>
                     </select>
                   </div>
                 </div>

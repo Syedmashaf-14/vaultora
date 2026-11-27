@@ -103,30 +103,54 @@ const pep = {
       }
 
       const userId = req.user.id;
+      const deletedBy = Array.isArray(doc.deletedBy) ? doc.deletedBy : [];
+      if (deletedBy.includes(userId)) {
+        return res.status(404).json({ error: 'Document has been removed from your workspace.' });
+      }
+
       const isOwner = (doc.ownerId === userId);
 
       // Check if user is in Document ACL (wrappedDEKs array)
-      const aclEntry = doc.wrappedDEKs.find(w => w.userId === userId);
+      const aclEntry = (doc.wrappedDEKs || []).find(w => w.userId === userId);
 
       // Check temporal expiration if user has an ACL entry
-      if (aclEntry && aclEntry.expiresAt) {
+      if (!isOwner && aclEntry && aclEntry.expiresAt) {
         const now = new Date();
         const exp = new Date(aclEntry.expiresAt);
         if (now > exp) {
+          // Auto-remove expired entry immediately (not moved to trash)
+          const remainingDEKs = (doc.wrappedDEKs || []).filter(w => w.userId !== userId);
+          await db.updateDoc(doc.id, {
+            wrappedDEKs: remainingDEKs,
+            starredBy: (doc.starredBy || []).filter(id => id !== userId),
+            archivedBy: (doc.archivedBy || []).filter(id => id !== userId),
+            trashedBy: (doc.trashedBy || []).filter(id => id !== userId)
+          });
+
           await auditChain.recordEvent({
             actorId: req.user.id,
             actorName: req.user.fullName,
             actorRole: req.user.role,
-            action: 'EXPIRED_ACCESS_ATTEMPT',
+            action: 'TEMPORARY_ACCESS_EXPIRED',
             targetDocId: doc.id,
             targetDocName: doc.originalName,
             outcome: 'DENIED',
-            details: { expiresAt: aclEntry.expiresAt, attemptedPermission: requiredPermission }
+            details: { expiresAt: aclEntry.expiresAt, action: 'Auto-deleted expired access' }
           });
           return res.status(403).json({
-            error: 'Access Denied: Your document access permission has expired.',
+            error: 'Temporary access expired: This document has been automatically removed.',
             expiredAt: aclEntry.expiresAt
           });
+        }
+      }
+
+      // Personal workspace operations (star, archive, trash, restore, delete-self) allowed for any authorized holder
+      if (requiredPermission === 'personal') {
+        if (isOwner || aclEntry) {
+          req.doc = doc;
+          req.docPermission = isOwner ? 'owner' : aclEntry.permission;
+          req.userWrappedDEK = aclEntry ? aclEntry.wrappedKey : null;
+          return next();
         }
       }
 
@@ -137,7 +161,7 @@ const pep = {
         return next();
       }
 
-      // Delete and Revoke operations are strictly Owner-Only
+      // Revoke and Owner-level mutations are strictly Owner-Only
       if (['delete', 'revoke', 're-encrypt'].includes(requiredPermission)) {
         await auditChain.recordEvent({
           actorId: req.user.id,

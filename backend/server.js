@@ -321,50 +321,181 @@ app.post('/api/documents/upload', pep.authenticate, upload.single('file'), async
   }
 });
 
+// Helper: Auto-purge expired temporary access entries (NOT sent to trash)
+async function pruneExpiredAccess() {
+  try {
+    const allDocs = await db.getDocuments();
+    const now = new Date();
+    const cleanedDocs = [];
+
+    for (const doc of allDocs) {
+      let changed = false;
+      const validDEKs = [];
+      const expiredEntries = [];
+
+      for (const entry of (doc.wrappedDEKs || [])) {
+        // Owner never expires; check recipients with expiresAt
+        if (entry.userId !== doc.ownerId && entry.expiresAt && now > new Date(entry.expiresAt)) {
+          expiredEntries.push(entry);
+          changed = true;
+        } else {
+          validDEKs.push(entry);
+        }
+      }
+
+      if (changed) {
+        let starredBy = Array.isArray(doc.starredBy) ? [...doc.starredBy] : [];
+        let archivedBy = Array.isArray(doc.archivedBy) ? [...doc.archivedBy] : [];
+        let trashedBy = Array.isArray(doc.trashedBy) ? [...doc.trashedBy] : [];
+
+        for (const exp of expiredEntries) {
+          starredBy = starredBy.filter(id => id !== exp.userId);
+          archivedBy = archivedBy.filter(id => id !== exp.userId);
+          trashedBy = trashedBy.filter(id => id !== exp.userId);
+
+          await auditChain.recordEvent({
+            actorId: exp.userId,
+            actorName: exp.userName || exp.userId,
+            actorRole: 'system',
+            action: 'TEMPORARY_ACCESS_EXPIRED',
+            targetDocId: doc.id,
+            targetDocName: doc.originalName,
+            outcome: 'SUCCESS',
+            details: {
+              expiredAt: exp.expiresAt,
+              autoAction: 'Permanently removed from user access list (bypassed Trash)'
+            }
+          });
+        }
+
+        const deletedBy = Array.isArray(doc.deletedBy) ? doc.deletedBy : [];
+        const remainingHolders = validDEKs.filter(w => !deletedBy.includes(w.userId));
+
+        if (remainingHolders.length === 0) {
+          storage.deleteEncryptedBlob(doc.id);
+          await db.deleteDoc(doc.id);
+          continue; // Document completely purged
+        } else {
+          const updated = await db.updateDoc(doc.id, {
+            wrappedDEKs: validDEKs,
+            starredBy,
+            archivedBy,
+            trashedBy
+          });
+          cleanedDocs.push(updated || { ...doc, wrappedDEKs: validDEKs, starredBy, archivedBy, trashedBy });
+          continue;
+        }
+      }
+
+      cleanedDocs.push(doc);
+    }
+
+    return cleanedDocs;
+  } catch (err) {
+    console.error('Error pruning expired access:', err);
+    return await db.getDocuments();
+  }
+}
+
+// Helper: Remove/delete document for a specific user (Owner OR Recipient)
+// Physically purges encrypted blob & DB doc ONLY when zero holders remain.
+async function deleteDocumentForUser(doc, user) {
+  const userId = user.id;
+  const remainingDEKs = (doc.wrappedDEKs || []).filter(w => w.userId !== userId);
+  const deletedBy = Array.isArray(doc.deletedBy) ? [...doc.deletedBy] : [];
+  if (!deletedBy.includes(userId)) deletedBy.push(userId);
+
+  const starredBy = (doc.starredBy || []).filter(id => id !== userId);
+  const archivedBy = (doc.archivedBy || []).filter(id => id !== userId);
+  const trashedBy = (doc.trashedBy || []).filter(id => id !== userId);
+
+  const activeHolders = remainingDEKs.filter(w => !deletedBy.includes(w.userId));
+
+  if (activeHolders.length === 0) {
+    storage.deleteEncryptedBlob(doc.id);
+    await db.deleteDoc(doc.id);
+  } else {
+    await db.updateDoc(doc.id, {
+      wrappedDEKs: remainingDEKs,
+      deletedBy,
+      starredBy,
+      archivedBy,
+      trashedBy
+    });
+  }
+
+  await auditChain.recordEvent({
+    actorId: user.id,
+    actorName: user.fullName,
+    actorRole: user.role,
+    action: activeHolders.length === 0 ? 'DOCUMENT_PURGED' : 'USER_COPY_DELETED',
+    targetDocId: doc.id,
+    targetDocName: doc.originalName,
+    outcome: 'SUCCESS',
+    details: {
+      sizeBytes: doc.size,
+      remainingHoldersCount: activeHolders.length
+    }
+  });
+}
+
+// Run automatic expiration sweep every 15 seconds
+setInterval(() => {
+  pruneExpiredAccess().catch(() => {});
+}, 15000);
+
 // List Documents Accessible to Current User
 app.get('/api/documents', pep.authenticate, async (req, res) => {
-  const allDocs = await db.getDocuments();
+  const allDocs = await pruneExpiredAccess();
   const userId = req.user.id;
 
-  // Filter documents where user is owner OR user exists in wrappedDEKs ACL
+  // Filter documents accessible to user (not deleted by them, and in ACL or owner)
   const accessibleDocs = allDocs.filter(d => {
+    const deletedBy = Array.isArray(d.deletedBy) ? d.deletedBy : [];
+    if (deletedBy.includes(userId)) return false;
+
     if (d.ownerId === userId) return true;
     return d.wrappedDEKs && d.wrappedDEKs.some(w => w.userId === userId);
   });
 
-  const activeDocs = accessibleDocs.filter(d => !d.isTrashed && !d.isArchived);
+  const mappedDocs = accessibleDocs.map(d => {
+    const myAcl = d.wrappedDEKs ? d.wrappedDEKs.find(w => w.userId === userId) : null;
+    const starredList = Array.isArray(d.starredBy) ? d.starredBy : [];
+    const archivedList = Array.isArray(d.archivedBy) ? d.archivedBy : [];
+    const trashedList = Array.isArray(d.trashedBy) ? d.trashedBy : [];
+
+    return {
+      id: d.id,
+      originalName: d.originalName,
+      fileType: d.fileType,
+      size: d.size,
+      ownerId: d.ownerId,
+      ownerName: d.ownerName,
+      isOwner: (d.ownerId === userId),
+      myPermission: (d.ownerId === userId) ? 'owner' : (myAcl?.permission || 'none'),
+      expiresAt: (d.ownerId === userId) ? null : (myAcl?.expiresAt || null),
+      isStarred: starredList.includes(userId),
+      isArchived: archivedList.includes(userId),
+      isTrashed: trashedList.includes(userId),
+      sharedUsers: (d.wrappedDEKs || []).map(w => ({
+        userId: w.userId,
+        userName: w.userName,
+        permission: w.permission,
+        expiresAt: w.expiresAt || null
+      })),
+      createdAt: d.createdAt,
+      updatedAt: d.updatedAt
+    };
+  });
+
+  const activeDocs = mappedDocs.filter(d => !d.isTrashed && !d.isArchived);
   const totalCount = activeDocs.length;
-  const sharedWithMeCount = activeDocs.filter(d => d.ownerId !== userId).length;
+  const sharedWithMeCount = activeDocs.filter(d => !d.isOwner).length;
   const protectedCount = activeDocs.length;
   const totalBytes = activeDocs.reduce((acc, d) => acc + (d.size || 0), 0);
 
   res.json({
-    documents: accessibleDocs.map(d => {
-      const myAcl = d.wrappedDEKs ? d.wrappedDEKs.find(w => w.userId === userId) : null;
-      const starredList = Array.isArray(d.starredBy) ? d.starredBy : [];
-      return {
-        id: d.id,
-        originalName: d.originalName,
-        fileType: d.fileType,
-        size: d.size,
-        ownerId: d.ownerId,
-        ownerName: d.ownerName,
-        isOwner: (d.ownerId === userId),
-        myPermission: (d.ownerId === userId) ? 'owner' : (myAcl?.permission || 'none'),
-        expiresAt: myAcl?.expiresAt || null,
-        isStarred: starredList.includes(userId),
-        isArchived: !!d.isArchived,
-        isTrashed: !!d.isTrashed,
-        trashedAt: d.trashedAt || null,
-        sharedUsers: (d.wrappedDEKs || []).map(w => ({
-          userId: w.userId,
-          userName: w.userName,
-          permission: w.permission
-        })),
-        createdAt: d.createdAt,
-        updatedAt: d.updatedAt
-      };
-    }),
+    documents: mappedDocs,
     metrics: {
       totalDocuments: totalCount,
       sharedWithYou: sharedWithMeCount,
@@ -477,7 +608,15 @@ app.post('/api/documents/:id/share', pep.authenticate, pep.enforceDocAccess('sha
       doc.wrappedDEKs.push(aclEntry);
     }
 
-    const updated = await db.updateDoc(doc.id, { wrappedDEKs: doc.wrappedDEKs });
+    // If recipient previously deleted or trashed an older share, restore visibility for this fresh share
+    const deletedBy = (doc.deletedBy || []).filter(id => id !== recipientId);
+    const trashedBy = (doc.trashedBy || []).filter(id => id !== recipientId);
+
+    const updated = await db.updateDoc(doc.id, {
+      wrappedDEKs: doc.wrappedDEKs,
+      deletedBy,
+      trashedBy
+    });
 
     await auditChain.recordEvent({
       actorId: req.user.id,
@@ -606,38 +745,51 @@ app.post('/api/documents/:id/star', pep.authenticate, pep.enforceDocAccess('read
   }
 });
 
-// Toggle Archive on Document
-app.post('/api/documents/:id/archive', pep.authenticate, pep.enforceDocAccess('write'), async (req, res) => {
+// Toggle Archive on Document (Per-User Workspace Isolation)
+app.post('/api/documents/:id/archive', pep.authenticate, pep.enforceDocAccess('personal'), async (req, res) => {
   try {
     const doc = req.doc;
-    const newArchivedState = !doc.isArchived;
-    await db.updateDoc(doc.id, { isArchived: newArchivedState });
+    const userId = req.user.id;
+    let archivedBy = Array.isArray(doc.archivedBy) ? [...doc.archivedBy] : [];
+    const isCurrentlyArchived = archivedBy.includes(userId);
+
+    if (isCurrentlyArchived) {
+      archivedBy = archivedBy.filter(id => id !== userId);
+    } else {
+      archivedBy.push(userId);
+    }
+
+    await db.updateDoc(doc.id, { archivedBy });
 
     await auditChain.recordEvent({
       actorId: req.user.id,
       actorName: req.user.fullName,
       actorRole: req.user.role,
-      action: newArchivedState ? 'DOCUMENT_ARCHIVED' : 'DOCUMENT_UNARCHIVED',
+      action: !isCurrentlyArchived ? 'DOCUMENT_ARCHIVED' : 'DOCUMENT_UNARCHIVED',
       targetDocId: doc.id,
       targetDocName: doc.originalName,
       outcome: 'SUCCESS',
-      details: { isArchived: newArchivedState }
+      details: { isArchived: !isCurrentlyArchived, scope: 'Per-User Vault' }
     });
 
     res.json({
-      message: newArchivedState ? 'Document moved to archive.' : 'Document unarchived.',
-      isArchived: newArchivedState
+      message: !isCurrentlyArchived ? 'Document moved to your archive.' : 'Document unarchived.',
+      isArchived: !isCurrentlyArchived
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Move Document to Trash (Soft Delete)
-app.post('/api/documents/:id/trash', pep.authenticate, pep.enforceDocAccess('delete'), async (req, res) => {
+// Move Document to Trash (Per-User Soft Delete - Does NOT affect other users' copies)
+app.post('/api/documents/:id/trash', pep.authenticate, pep.enforceDocAccess('personal'), async (req, res) => {
   try {
     const doc = req.doc;
-    await db.updateDoc(doc.id, { isTrashed: true, trashedAt: new Date() });
+    const userId = req.user.id;
+    const trashedBy = Array.isArray(doc.trashedBy) ? [...doc.trashedBy] : [];
+    if (!trashedBy.includes(userId)) trashedBy.push(userId);
+
+    await db.updateDoc(doc.id, { trashedBy });
 
     await auditChain.recordEvent({
       actorId: req.user.id,
@@ -646,20 +798,24 @@ app.post('/api/documents/:id/trash', pep.authenticate, pep.enforceDocAccess('del
       action: 'DOCUMENT_TRASHED',
       targetDocId: doc.id,
       targetDocName: doc.originalName,
-      outcome: 'SUCCESS'
+      outcome: 'SUCCESS',
+      details: { scope: 'Per-User Trash (Shared recipients unaffected)' }
     });
 
-    res.json({ message: 'Document moved to Trash.' });
+    res.json({ message: 'Document moved to your Trash.' });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Restore Document from Trash
-app.post('/api/documents/:id/restore', pep.authenticate, pep.enforceDocAccess('delete'), async (req, res) => {
+// Restore Document from Trash (Per-User)
+app.post('/api/documents/:id/restore', pep.authenticate, pep.enforceDocAccess('personal'), async (req, res) => {
   try {
     const doc = req.doc;
-    await db.updateDoc(doc.id, { isTrashed: false, trashedAt: null });
+    const userId = req.user.id;
+    const trashedBy = (doc.trashedBy || []).filter(id => id !== userId);
+
+    await db.updateDoc(doc.id, { trashedBy });
 
     await auditChain.recordEvent({
       actorId: req.user.id,
@@ -677,55 +833,30 @@ app.post('/api/documents/:id/restore', pep.authenticate, pep.enforceDocAccess('d
   }
 });
 
-// Empty All Trashed Documents
+// Empty All Trashed Documents for Current User
 app.post('/api/documents/trash/empty', pep.authenticate, async (req, res) => {
   try {
     const allDocs = await db.getDocuments();
-    const trashedDocs = allDocs.filter(d => d.ownerId === req.user.id && d.isTrashed);
+    const userId = req.user.id;
+    const trashedDocs = allDocs.filter(d => (d.trashedBy || []).includes(userId));
 
     for (const doc of trashedDocs) {
-      storage.deleteEncryptedBlob(doc.id);
-      await db.deleteDoc(doc.id);
-      await auditChain.recordEvent({
-        actorId: req.user.id,
-        actorName: req.user.fullName,
-        actorRole: req.user.role,
-        action: 'DOCUMENT_PURGED',
-        targetDocId: doc.id,
-        targetDocName: doc.originalName,
-        outcome: 'SUCCESS',
-        details: { permanentPurge: true }
-      });
+      await deleteDocumentForUser(doc, req.user);
     }
 
-    res.json({ message: `Purged ${trashedDocs.length} documents from Trash.` });
+    res.json({ message: `Permanently removed ${trashedDocs.length} document(s) from your Trash.` });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// Delete Document (Permanent)
-app.delete('/api/documents/:id', pep.authenticate, pep.enforceDocAccess('delete'), async (req, res) => {
+// Delete Document Permanently for Current User (Owner or Recipient)
+app.delete('/api/documents/:id', pep.authenticate, pep.enforceDocAccess('personal'), async (req, res) => {
   try {
     const doc = req.doc;
+    await deleteDocumentForUser(doc, req.user);
 
-    storage.deleteEncryptedBlob(doc.id);
-    await db.deleteDoc(doc.id);
-
-    await auditChain.recordEvent({
-      actorId: req.user.id,
-      actorName: req.user.fullName,
-      actorRole: req.user.role,
-      action: 'DOCUMENT_DELETED',
-      targetDocId: doc.id,
-      targetDocName: doc.originalName,
-      outcome: 'SUCCESS',
-      details: {
-        sizeBytes: doc.size
-      }
-    });
-
-    res.json({ message: 'Document and encrypted vault blob deleted permanently.' });
+    res.json({ message: 'Document permanently removed from your workspace.' });
   } catch (err) {
     console.error('Delete error:', err);
     res.status(500).json({ error: 'Failed to delete document.', details: err.message });
