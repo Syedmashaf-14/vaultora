@@ -1,11 +1,11 @@
 const crypto = require('crypto');
 const db = require('./database');
 
-const GENESIS_PREV_HASH = '0'.repeat(64);
+const GENESIS_PREV_HASH = '0'.repeat(128); // 128 hex chars for SHA-512 (512 bits)
 
 function calculateBlockHash(prevHash, timestamp, actorId, action, targetDocId, outcome) {
   const payload = `${prevHash}|${timestamp}|${actorId}|${action}|${targetDocId || 'NONE'}|${outcome}`;
-  return crypto.createHash('sha256').update(payload, 'utf8').digest('hex');
+  return crypto.createHash('sha512').update(payload, 'utf8').digest('hex');
 }
 
 async function initGenesisIfNeeded() {
@@ -30,7 +30,7 @@ async function initGenesisIfNeeded() {
       outcome,
       details: {
         event: 'Cryptographic Hash-Chain Ledger initialized in MongoDB',
-        algorithm: 'SHA-256 Chained Block Integrity',
+        algorithm: 'SHA-512 Chained Block Integrity',
         standard: 'CS3002 Zero-Trust Spec'
       },
       prevHash: GENESIS_PREV_HASH,
@@ -119,7 +119,7 @@ const auditChain = {
         return {
           valid: false,
           brokenIndex: i,
-          reason: `Content tampering detected at block #${i}. Block data has been modified, invalidating the SHA-256 digest.`,
+          reason: `Content tampering detected at block #${i}. Block data has been modified, invalidating the SHA-512 digest.`,
           storedHash: block.currHash,
           recalculatedHash,
           block
@@ -131,7 +131,7 @@ const auditChain = {
       valid: true,
       totalBlocks: logs.length,
       lastBlockHash: logs[logs.length - 1].currHash,
-      message: `Audit chain integrity verified across all ${logs.length} MongoDB blocks without tampering.`
+      message: `Audit chain integrity verified across all ${logs.length} MongoDB blocks using SHA-512 hash chain.`
     };
   },
 

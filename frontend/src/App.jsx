@@ -296,7 +296,8 @@ export default function App() {
       formData.append('fileType', uploadFile.name.split('.').pop() || 'bin');
       formData.append('iv', encResult.ivBase64);
       formData.append('authTag', encResult.authTagBase64);
-      formData.append('sha256', encResult.sha256Hex);
+      formData.append('sha512', encResult.sha512Hex);
+      formData.append('sha256', encResult.sha512Hex);
       formData.append('wrappedDEK', encResult.wrappedDEKBase64);
 
       setUploadProgress('Storing metadata in MongoDB and ciphertext to /vault/...');
@@ -356,11 +357,11 @@ export default function App() {
         setUserPrivateKey(privKey);
       }
 
-      const { decryptedBuffer, verifiedSha256 } = await decryptDocument(
+      const { decryptedBuffer, verifiedSha512 } = await decryptDocument(
         encryptedBuffer,
         meta.iv,
         meta.authTag,
-        meta.sha256,
+        meta.sha512 || meta.sha256,
         meta.userWrappedDEK,
         privKey
       );
@@ -375,7 +376,7 @@ export default function App() {
       window.URL.revokeObjectURL(url);
       document.body.removeChild(a);
 
-      showToast(`Decryption & SHA-256 verification successful (${verifiedSha256.substring(0, 8)}...)`, 'success');
+      showToast(`Decryption & SHA-512 verification successful (${(verifiedSha512 || '').substring(0, 10)}...)`, 'success');
       await loadDashboardData();
     } catch (err) {
       console.error('Decryption error:', err);
@@ -474,10 +475,10 @@ export default function App() {
     }
   };
 
-  // 8. Cryptographic Hash Chain Verification
+  // 8. Cryptographic Hash Chain Verification (SHA-512)
   const handleVerifyAuditChain = async () => {
     try {
-      showToast('Running recursive SHA-256 verification across all MongoDB audit blocks...', 'info');
+      showToast('Running recursive SHA-512 verification across all MongoDB audit blocks...', 'info');
       const res = await fetch('/api/audit/verify');
       const data = await res.json();
       setAuditVerification(data);
@@ -1554,7 +1555,7 @@ export default function App() {
                 <div>
                   <h2 className="text-base font-bold text-slate-900">Security Center & Audit Ledger</h2>
                   <p className="text-xs text-slate-400">
-                    MongoDB Cryptographic SHA-256 Hash-Chained Verification & Adversarial Tests
+                    MongoDB Cryptographic SHA-512 Hash-Chained Verification & Adversarial Tests
                   </p>
                 </div>
               </div>

@@ -8,19 +8,28 @@
 ## Overview
 **Vaultora** is an enterprise-grade Secure Document Management System engineered under a strict **Zero-Trust Hybrid-Encrypted Architecture**. The application server and database act as blind relays, handling only encrypted ciphertext and public-key-wrapped symmetric keys. Plaintext document contents and private cryptographic keys never touch the network or the backend server.
 
+### Studied Information Security Algorithms Implemented & Evaluated
+The system strictly incorporates and analyzes the core algorithms studied in the CS3002 curriculum:
+1. **AES (Advanced Encryption Standard):** 256-bit AES in Galois/Counter Mode (AES-256-GCM) providing authenticated payload confidentiality and integrity (AEAD).
+2. **DES (Data Encryption Standard):** Analyzed, benchmarked, and contrasted in the Design Decision Record (DDR); rejected due to 56-bit key space vulnerability.
+3. **SHA-512 (Secure Hash Algorithm 512-bit):** Used for end-to-end client-side file integrity verification, PBKDF2 local key derivation, and the 512-bit tamper-evident block-to-block audit hash chain.
+4. **Diffie-Hellman (DH):** Implemented and evaluated for dynamic forward-secret ephemeral session key agreement.
+5. **ElGamal Cryptosystem:** Evaluated and contrasted against RSA in the DDR with mathematical analysis of the Discrete Logarithm Problem and ciphertext expansion.
+6. **RSA (Rivest-Shamir-Adleman):** 2048-bit RSA with Optimal Asymmetric Encryption Padding (RSA-OAEP) for user identity keypairs and multi-recipient DEK envelope wrapping.
+
 ---
 
 ## Key Features & Architecture Implementation (Part 2)
 
 ### 1. Client-Side Cryptographic Engine (Web Crypto API)
-- **Key Generation:** Generates asymmetric `RSA-OAEP-2048` keypairs on the client. Public keys are registered for user discovery; private keys are encrypted locally using a password-derived Key Encryption Key (KEK) via `PBKDF2` (SHA-256, 600,000 iterations).
-- **Envelope Encryption:** Every document upload generates an ephemeral, cryptographically secure 256-bit symmetric Document Encryption Key (`DEK`) and a 12-byte random `IV`.
-- **Payload Protection:** Files are encrypted client-side using `AES-256-GCM` (producing ciphertext and a 16-byte authentication tag). A client-side `SHA-256` digest is also calculated before encryption.
+- **Key Generation:** Generates asymmetric `RSA-OAEP-2048` keypairs on the client. Public keys are registered in MongoDB for user discovery; private keys are encrypted locally using a password-derived Key Encryption Key (KEK) via `PBKDF2` (SHA-512, 600,000 iterations).
+- **Envelope Encryption:** Every document upload generates an ephemeral, cryptographically secure 256-bit symmetric Document Encryption Key (`DEK`) and a 12-byte random `IV` using AES-256-GCM.
+- **Payload Protection:** Files are encrypted client-side using `AES-256-GCM` (producing ciphertext and a 16-byte authentication tag). A client-side `SHA-512` digest is calculated before encryption.
 - **Envelope Wrapping:** The 256-bit DEK is encrypted with the user's RSA-OAEP public key (`Wrapped_DEK`).
 
 ### 2. Physical Storage & Metadata Isolation
 - **Storage Vault (`/vault/<uuid>.enc`):** Binary storage volume holds strictly random UUIDv4-named files containing raw, high-entropy AES-GCM ciphertext. No original filenames, extensions, or metadata exist on disk.
-- **Metadata Database (`/backend/data/`):** Dedicated document store maintaining access vectors, IVs, authentication tags, SHA-256 checksums, and RSA-wrapped DEKs.
+- **Metadata Database (MongoDB Atlas):** Dedicated document store maintaining access vectors, IVs, authentication tags, SHA-512 checksums, and RSA-wrapped DEKs.
 
 ### 3. Identity & Dual-Layer Access Control (PEP)
 - **Authentication:** Memory-hard `Argon2id` password hashing ($m=65536, t=3, p=4$) combined with signed JSON Web Tokens (JWT) transmitted via `HttpOnly`, `SameSite=Strict` secure session cookies.
@@ -34,10 +43,10 @@
   - *Standard Revocation:* Immediate server-side removal of the recipient's ACL entry, blocking subsequent API calls.
   - *Cryptographic Revocation:* Client re-encrypts the document with a fresh DEK, re-wraps it only for remaining authorized recipients, and overwrites the vault ciphertext.
 
-### 5. Tamper-Evident Hash-Chained Audit Ledger
-- Append-only cryptographic ledger linking every security event:
-  $$\text{currHash} = \text{SHA256}(\text{prevHash} \parallel \text{timestamp} \parallel \text{actorId} \parallel \text{action} \parallel \text{targetDocId} \parallel \text{outcome})$$
-- Starts with a deterministic Genesis Block (`0000000000000000...`).
+### 5. Tamper-Evident SHA-512 Hash-Chained Audit Ledger
+- Append-only cryptographic ledger linking every security event with 512-bit hash pointers:
+  $$\text{currHash} = \text{SHA512}(\text{prevHash} \parallel \text{timestamp} \parallel \text{actorId} \parallel \text{action} \parallel \text{targetDocId} \parallel \text{outcome})$$
+- Starts with a deterministic Genesis Block (`00000000...` 128 hex characters).
 - Built-in verification engine recalculates the chain and flags the exact block index of any unauthorized modification or deletion.
 
 ---

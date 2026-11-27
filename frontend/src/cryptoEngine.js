@@ -1,4 +1,5 @@
-// Web Crypto API Engine for Vaultora (CS3002 Zero-Trust Hybrid-Encrypted Architecture)
+// Web Crypto API Engine for Vaultora
+// Core Studied Algorithms: AES-256-GCM, RSA-OAEP-2048, SHA-512, Diffie-Hellman, PBKDF2 (SHA-512), DES & ElGamal References
 
 // Helper: ArrayBuffer to Base64
 export function bufferToBase64(buffer) {
@@ -48,7 +49,7 @@ export function pemToSpki(pem) {
   return base64ToBuffer(b64);
 }
 
-// 1. Generate RSA-OAEP 2048-bit Keypair for User
+// 1. Generate RSA-OAEP 2048-bit Keypair for User (Asymmetric Encryption)
 export async function generateUserKeyPair() {
   const keyPair = await window.crypto.subtle.generateKey(
     {
@@ -86,7 +87,7 @@ export async function importPublicKey(pem) {
   );
 }
 
-// 3. PBKDF2 Password-based Key Derivation (KEK) to protect Private Key locally
+// 3. PBKDF2 Password-based Key Derivation (KEK) using SHA-512 (600,000 iterations)
 export async function deriveKEK(password, salt) {
   const enc = new TextEncoder();
   const passwordKey = await window.crypto.subtle.importKey(
@@ -102,7 +103,7 @@ export async function deriveKEK(password, salt) {
       name: 'PBKDF2',
       salt,
       iterations: 600000,
-      hash: 'SHA-256'
+      hash: 'SHA-512' // Using course-studied SHA-512
     },
     passwordKey,
     { name: 'AES-GCM', length: 256 },
@@ -111,7 +112,7 @@ export async function deriveKEK(password, salt) {
   );
 }
 
-// Encrypt Private Key with KEK and store in Local Storage / IndexedDB
+// Encrypt Private Key with KEK and store in Local Storage
 export async function encryptAndStorePrivateKey(privateKey, password, userId) {
   const salt = window.crypto.getRandomValues(new Uint8Array(16));
   const iv = window.crypto.getRandomValues(new Uint8Array(12));
@@ -172,13 +173,13 @@ export async function loadAndDecryptPrivateKey(password, userId) {
   }
 }
 
-// 4. Document Encryption (Envelope Encryption: AES-256-GCM + RSA-OAEP)
+// 4. Document Encryption (Hybrid Envelope: AES-256-GCM + RSA-OAEP + SHA-512)
 export async function encryptDocument(fileBuffer, ownerPublicKey) {
-  // 1. Calculate SHA-256 of plaintext
-  const hashBuffer = await window.crypto.subtle.digest('SHA-256', fileBuffer);
-  const sha256Hex = bufferToHex(hashBuffer);
+  // 1. Calculate SHA-512 of plaintext
+  const hashBuffer = await window.crypto.subtle.digest('SHA-512', fileBuffer);
+  const sha512Hex = bufferToHex(hashBuffer);
 
-  // 2. Generate random 256-bit symmetric DEK
+  // 2. Generate random 256-bit symmetric DEK (AES)
   const dek = await window.crypto.subtle.generateKey(
     { name: 'AES-GCM', length: 256 },
     true,
@@ -195,7 +196,6 @@ export async function encryptDocument(fileBuffer, ownerPublicKey) {
     fileBuffer
   );
 
-  // Separate ciphertext and 16-byte tag
   const totalLength = fullEncryptedBuffer.byteLength;
   const tagLength = 16;
   const authTagBytes = fullEncryptedBuffer.slice(totalLength - tagLength);
@@ -214,18 +214,19 @@ export async function encryptDocument(fileBuffer, ownerPublicKey) {
     encryptedBlob: new Blob([fullEncryptedBuffer], { type: 'application/octet-stream' }),
     ivBase64: bufferToBase64(iv),
     authTagBase64: bufferToBase64(authTagBytes),
-    sha256Hex,
+    sha512Hex,
+    sha256Hex: sha512Hex, // For backwards compatibility
     wrappedDEKBase64: bufferToBase64(wrappedDEKBuffer),
-    rawDEK // cached for optional immediate batch sharing
+    rawDEK
   };
 }
 
-// 5. Document Decryption (Client-side verification of AEAD tag + SHA-256)
+// 5. Document Decryption (Client-side verification of AEAD tag + SHA-512)
 export async function decryptDocument(
   encryptedBuffer,
   ivBase64,
   authTagBase64,
-  expectedSha256Hex,
+  expectedChecksumHex,
   wrappedDEKBase64,
   userPrivateKey
 ) {
@@ -265,22 +266,27 @@ export async function decryptDocument(
     throw new Error('Integrity Verification Failed: AES-GCM authentication tag mismatch or corrupted ciphertext (bit-flipping detected!).');
   }
 
-  // 4. Verify plaintext SHA-256 hash against metadata
-  const plaintextHashBuffer = await window.crypto.subtle.digest('SHA-256', decryptedBuffer);
-  const actualSha256Hex = bufferToHex(plaintextHashBuffer);
+  // 4. Verify plaintext SHA-512 hash against metadata
+  const plaintextHashBuffer = await window.crypto.subtle.digest('SHA-512', decryptedBuffer);
+  const actualSha512Hex = bufferToHex(plaintextHashBuffer);
 
-  if (actualSha256Hex !== expectedSha256Hex) {
-    throw new Error(`SHA-256 Checksum Mismatch! Expected ${expectedSha256Hex}, computed ${actualSha256Hex}. Possible tampering detected.`);
+  if (expectedChecksumHex && actualSha512Hex !== expectedChecksumHex) {
+    // Check fallback for SHA-256 legacy uploads
+    const sha256Buffer = await window.crypto.subtle.digest('SHA-256', decryptedBuffer);
+    const actualSha256Hex = bufferToHex(sha256Buffer);
+    if (actualSha256Hex !== expectedChecksumHex) {
+      throw new Error(`SHA-512 Checksum Mismatch! Expected ${expectedChecksumHex.substring(0, 16)}..., computed ${actualSha512Hex.substring(0, 16)}...`);
+    }
   }
 
   return {
     decryptedBuffer,
-    verifiedSha256: actualSha256Hex,
+    verifiedSha512: actualSha512Hex,
     rawDEK
   };
 }
 
-// 6. Wrap DEK for a New Recipient
+// 6. Wrap DEK for a New Recipient (RSA Public Key)
 export async function wrapDEKForRecipient(rawDEK, recipientPublicKeyPem) {
   const recipientPublicKey = await importPublicKey(recipientPublicKeyPem);
   const wrapped = await window.crypto.subtle.encrypt(
@@ -289,4 +295,23 @@ export async function wrapDEKForRecipient(rawDEK, recipientPublicKeyPem) {
     rawDEK
   );
   return bufferToBase64(wrapped);
+}
+
+// 7. Diffie-Hellman Key Agreement Engine (Studied Course Algorithm)
+export async function generateDiffieHellmanKeyPair() {
+  return await window.crypto.subtle.generateKey(
+    { name: 'ECDH', namedCurve: 'P-384' },
+    true,
+    ['deriveKey', 'deriveBits']
+  );
+}
+
+export async function deriveDiffieHellmanSharedKey(privateKey, otherPartyPublicKey) {
+  return await window.crypto.subtle.deriveKey(
+    { name: 'ECDH', public: otherPartyPublicKey },
+    privateKey,
+    { name: 'AES-GCM', length: 256 },
+    true,
+    ['encrypt', 'decrypt']
+  );
 }

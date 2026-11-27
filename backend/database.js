@@ -51,7 +51,8 @@ const DocumentSchema = new mongoose.Schema({
   ownerName: { type: String, required: true },
   iv: { type: String, required: true },
   authTag: { type: String, required: true },
-  sha256: { type: String, required: true },
+  sha512: { type: String },
+  sha256: { type: String },
   storagePath: { type: String, required: true },
   wrappedDEKs: [
     {

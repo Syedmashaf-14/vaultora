@@ -6,26 +6,27 @@
 
 ---
 
-## Executive Summary
-This document formalizes the architectural, cryptographic, and access-control decisions underpinning the **Vaultora Secure Document Management System**. Built on a **Zero-Trust Hybrid-Encrypted Architecture**, the system guarantees end-to-end payload confidentiality, mathematical non-repudiation, strict cryptographic separation of duties, and tamper-evident auditability. 
+## Executive Summary & Studied Cryptographic Algorithms Alignment
+This document formalizes the architectural, cryptographic, and access-control decisions underpinning the **Vaultora Secure Document Management System**. Built on a **Zero-Trust Hybrid-Encrypted Architecture**, the system specifically integrates and defends the **six core information security algorithms** studied in the curriculum:
 
-The decisions below address the five core mandatory areas prescribed by the CS3002 specification:
-1. **Document Storage and Protection**
-2. **Cryptographic Approach and Key Management**
-3. **Authentication and Access-Control Model**
-4. **Document Sharing and Permission Revocation**
-5. **Audit Logging and Protection of Audit Records**
+1. **AES (Advanced Encryption Standard):** Selected for high-throughput, authenticated client-side symmetric document payload encryption (AES-256-GCM).
+2. **DES (Data Encryption Standard):** Analyzed and rejected as a legacy predecessor due to its inadequate 56-bit key length and susceptibility to differential cryptanalysis and brute-force attacks.
+3. **SHA-512 (Secure Hash Algorithm 512-bit):** Selected as the primary cryptographic hash standard for end-to-end file integrity verification, PBKDF2 local key derivation, and the tamper-evident block-to-block audit chain.
+4. **Diffie-Hellman (DH):** Investigated and evaluated for dynamic forward-secret shared secret agreement between active endpoints.
+5. **ElGamal Cryptosystem:** Evaluated as an alternative asymmetric cipher based on the Discrete Logarithm Problem (DLP); contrasted with RSA regarding ciphertext expansion and computational overhead.
+6. **RSA (Rivest-Shamir-Adleman):** Selected for asymmetric identity keypairs and multi-recipient Document Encryption Key (DEK) envelope wrapping via RSA-OAEP 2048-bit.
 
 ---
 
 ```
-                                SYSTEM SECURITY TOPOLOGY
+                              SYSTEM SECURITY TOPOLOGY
   ┌─────────────────────────────────────────────────────────────────────────────┐
   │                        CLIENT LAYER (Browser / React)                       │
   │  • Web Crypto API (SubtleCrypto)                                            │
   │  • RSA-OAEP 2048 Keypair per user (Public Key -> DB, Private Key -> Local)  │
-  │  • PBKDF2 (SHA-256, 600,000 iter) derives KEK from password -> Encrypts Key │
+  │  • PBKDF2 (SHA-512, 600,000 iter) derives KEK from password -> Encrypts Key │
   │  • File Upload: Client generates 256-bit AES-GCM DEK + 12-byte IV           │
+  │  • Payload Checksum: 512-bit SHA-512 digest computed before encryption      │
   │  • Envelope Wrapping: Encrypts DEK with Recipient's RSA-OAEP Public Key     │
   └──────────────────────────────────────┬──────────────────────────────────────┘
                                          │ HTTPS (TLS 1.3) + HttpOnly JWT Cookie
@@ -34,16 +35,16 @@ The decisions below address the five core mandatory areas prescribed by the CS30
   │                    SERVER / API GATEWAY (Node.js Express)                   │
   │  • Auth Middleware: Verifies JWT Cookie & Argon2id Password Hashes          │
   │  • Policy Enforcement Point (PEP): System RBAC + Document DAC (ACL)         │
-  │  • Audit Logger: Creates append-only, SHA-256 hash-chained ledgers          │
+  │  • Audit Logger: Creates append-only, SHA-512 hash-chained ledgers          │
   └──────────────────────────┬───────────────────────────────────┬──────────────┘
                              │ Metadata & ACL Updates            │ Pure Ciphertext
                              ▼                                   ▼
         ┌─────────────────────────────────────────┐     ┌───────────────────────┐
-        │          METADATA DB (MongoDB)          │     │ ENCRYPTED BLOB VAULT  │
+        │       METADATA DB (MongoDB Atlas)       │     │ ENCRYPTED BLOB VAULT  │
         │ • Users: { salt, argon2Hash, pubKey }   │     │ • /vault/<uuid>.enc   │
-        │ • Docs:  { uuid, iv, tag, sha256,       │     │ • High-entropy raw    │
+        │ • Docs:  { uuid, iv, tag, sha512,       │     │ • High-entropy raw    │
         │           ownerId, wrappedDEKs[] }      │     │   ciphertext only     │
-        │ • Audit: { prevHash, currHash }         │     │ • No cleartext headers│
+        │ • Audit: { prevHash, currHash (512-bit)│     │ • No cleartext headers│
         └─────────────────────────────────────────┘     └───────────────────────┘
 ```
 
@@ -52,23 +53,23 @@ The decisions below address the five core mandatory areas prescribed by the CS30
 ## Decision Record 1: Document Storage and Protection
 
 ### 1. The Problem Being Addressed
-In a document management system, stored documents represent high-value targets for both external adversaries (e.g., unauthorized file system exfiltration) and internal threats (e.g., rogue database administrators, backup inspection, or compromised microservices). The system must guarantee that:
+In a document management system, stored documents represent high-value targets for both external adversaries and internal threats (rogue database administrators, backup inspection, or compromised microservices). The system must guarantee that:
 - Stored files cannot be read even if the underlying physical storage volume or database is completely breached.
 - Predictable filenames do not allow attackers to enumerate or traverse files (preventing Insecure Direct Object References).
 - Metadata (filenames, user associations, access rights) is strictly isolated from raw encrypted payloads.
 
 ### 2. Alternatives Considered
 1. **Alternative 1.1: Plaintext File Storage with OS File-System Permissions**
-   - *Description:* Storing cleartext files in a server directory (e.g., `/var/uploads/`) and relying on Linux DAC file permissions (`chmod 600`) and web server routing rules.
-   - *Deficiencies:* Any remote code execution (RCE) on the web server, backup misconfiguration, or privilege escalation instantly exposes all documents in cleartext. Zero-trust principles are violated.
-2. **Alternative 1.2: Database Binary Storage (MongoDB GridFS / BLOB Columns)**
-   - *Description:* Storing unencrypted or server-encrypted binary files directly inside database collections alongside metadata.
-   - *Deficiencies:* Massively inflates database memory footprint and backup volume sizes; causes index bloat. A database SQL/NoSQL injection or dump exposes both the files and their structural metadata simultaneously.
-3. **Alternative 1.3: Server-Side Transparent Encryption (SSE / Disk Encryption)**
-   - *Description:* The server receives cleartext over TLS, encrypts the file before saving to disk, and decrypts it on the fly upon authenticated request.
-   - *Deficiencies:* The server process holds the decryption keys in memory. If an attacker gains memory-dump access or root credentials on the API server, all files can be decrypted. Insider threats (system administrators) remain fully unmitigated.
-4. **Alternative 1.4: Client-Side Envelope Encryption with Separated Physical Storage Volume (Selected)**
-   - *Description:* Documents are encrypted in the client browser prior to transmission. Encrypted files are stored on an isolated volume strictly named with 128-bit random UUIDv4 (`/vault/<uuid>.enc`). All metadata, IVs, tags, and wrapped keys are stored in a separate database collection.
+   - *Description:* Storing cleartext files in a server directory (e.g., `/var/uploads/`) relying solely on OS access controls (`chmod 600`).
+   - *Deficiencies:* Remote code execution (RCE) on the server or backup exfiltration instantly exposes all documents in cleartext. Violates Zero-Trust principles.
+2. **Alternative 1.2: Legacy Symmetric Block Ciphers (DES in CBC Mode)**
+   - *Description:* Encrypting server-side files using DES (Data Encryption Standard).
+   - *Deficiencies:* DES utilizes an obsolete 56-bit key space ($2^{56} \approx 7.2 \times 10^{16}$ keys), which can be broken via brute force in less than a day using modern hardware. DES operates on small 64-bit blocks, making it susceptible to birthday attacks and differential cryptanalysis.
+3. **Alternative 1.3: Database Binary Storage (MongoDB GridFS / BLOB Columns)**
+   - *Description:* Storing unencrypted binary files directly inside database collections alongside metadata.
+   - *Deficiencies:* Massive database memory footprint and index bloat. A database SQL/NoSQL injection exposes both raw files and operational metadata simultaneously.
+4. **Alternative 1.4: Client-Side Envelope Encryption (AES-256-GCM) with Separated Physical Storage Volume (Selected)**
+   - *Description:* Documents are encrypted in the client browser prior to transmission. Encrypted files are stored on an isolated volume strictly named with 128-bit random UUIDv4 (`/vault/<uuid>.enc`). All metadata, IVs, tags, SHA-512 hashes, and wrapped keys are stored in MongoDB Atlas.
 
 ### 3. Selected Approach and Justification
 **Selected:** Alternative 1.4 — Client-Side Encryption with Separated Physical Vault Storage.
@@ -83,8 +84,8 @@ In a document management system, stored documents represent high-value targets f
 - **Information Entropy:** Stored ciphertext exhibits near-maximum Shannon entropy ($H \approx 7.99$ bits/byte), preventing structural cryptanalysis.
 
 ### 5. Limitations, Risks, and Trade-offs
-- **Limitation:** Inability to perform native server-side full-text search or document indexing without exposing cleartext or deploying complex Searchable Symmetric Encryption (SSE).
-- **Trade-off:** Additional client-side CPU utilization for bulk encryption/decryption of very large files (mitigated through hardware-accelerated AES-NI via Web Crypto API).
+- **Limitation:** Inability to perform native server-side full-text search or document indexing without exposing cleartext.
+- **Trade-off:** Additional client-side CPU utilization for bulk encryption of large files (mitigated through hardware-accelerated AES-NI).
 - **Risk:** Loss of user authentication credentials and local key backup permanently renders the files unrecoverable.
 
 ---
@@ -95,21 +96,27 @@ In a document management system, stored documents represent high-value targets f
 How to protect confidential document payloads against unauthorized disclosure, bit-flipping, and ciphertext manipulation while providing multi-user access without re-encrypting multi-megabyte payloads for every recipient. Furthermore, private keys must be secured on client devices without being exposed in cleartext to the browser host environment.
 
 ### 2.2 Alternatives Considered
-1. **Alternative 2.1: Single Master Symmetric Key (Pure AES-CBC)**
-   - *Description:* Encrypting all system documents with a single server master AES-256 key in CBC mode.
-   - *Deficiencies:* CBC mode is vulnerable to padding oracle attacks (POODLE, Lucky Thirteen) and does not provide built-in ciphertext integrity (malleability/bit-flipping). Key compromise breaches all tenant data.
-2. **Alternative 2.2: Pure Asymmetric Encryption (RSA-2048 Direct File Encryption)**
-   - *Description:* Encrypting document payloads directly with the recipient's RSA public key.
-   - *Deficiencies:* Mathematically constrained: RSA-2048 with OAEP can encrypt a maximum of 214 bytes of data ($2048/8 - 2 \times 32 - 2 = 214$ bytes). Highly inefficient and unsuitable for bulk file data.
-3. **Alternative 2.3: Hybrid Envelope Encryption (AES-256-GCM + RSA-OAEP-2048) with Password-Derived KEK (Selected)**
-   - *Description:* Each document is encrypted once using a unique, ephemeral 256-bit symmetric Document Encryption Key (DEK) via AES-GCM (Authenticated Encryption with Associated Data). The DEK is then wrapped (encrypted) individually for authorized users using their respective RSA-OAEP 2048-bit public keys. User private keys are protected on the client using a Key Encryption Key (KEK) derived from the user's password via PBKDF2 (SHA-256, 600,000 iterations).
+1. **Alternative 2.1: Legacy DES / 3DES Encryption**
+   - *Description:* Utilizing DES (56-bit) or Triple-DES (112/168-bit) symmetric encryption.
+   - *Deficiencies:* DES is cryptographically broken due to its small key size. 3DES is computationally slow, vulnerable to Sweet32 collision attacks on 64-bit blocks, and deprecated by NIST.
+2. **Alternative 2.2: Pure Asymmetric Encryption (RSA-2048 or ElGamal Direct File Encryption)**
+   - *Description:* Encrypting file payloads directly using the recipient's RSA or ElGamal public key.
+   - *Deficiencies:* 
+     - *RSA Constraints:* RSA-2048 with OAEP can encrypt a maximum of 126 to 214 bytes of data directly. It cannot encrypt multi-megabyte files.
+     - *ElGamal Constraints:* The ElGamal cryptosystem (based on the Discrete Logarithm Problem in a cyclic group $\mathbb{Z}_p^*$) produces a $2\times$ ciphertext expansion (output consists of pair $(c_1, c_2) = (g^k \bmod p, m \cdot y^k \bmod p)$), doubling storage and transmission requirements.
+3. **Alternative 2.3: Diffie-Hellman Key Exchange (DH / ECDH) for Ephemeral Session Keys**
+   - *Description:* Utilizing Diffie-Hellman key exchange between the document owner and each viewer to establish a shared symmetric session key.
+   - *Deficiencies:* Diffie-Hellman requires both parties (or active session handshakes) to participate in key agreement. It does not provide asynchronous document sharing when recipients are offline.
+4. **Alternative 2.4: Hybrid Envelope Encryption (AES-256-GCM + RSA-OAEP-2048 + SHA-512 Checksum) with Password-Derived KEK (Selected)**
+   - *Description:* Each document is encrypted once using a unique, ephemeral 256-bit symmetric Document Encryption Key (DEK) via AES-GCM (Authenticated Encryption with Associated Data). The DEK is then wrapped (encrypted) individually for authorized users using their respective RSA-OAEP 2048-bit public keys. User private keys are protected on the client using a Key Encryption Key (KEK) derived from the user's password via PBKDF2 (SHA-512, 600,000 iterations). Document integrity is verified via a pre-encryption SHA-512 digest.
 
 ### 2.3 Selected Approach and Justification
-**Selected:** Alternative 2.3 — Hybrid Envelope Encryption via Web Crypto API.
+**Selected:** Alternative 2.4 — Hybrid Envelope Encryption via Web Crypto API.
 - **Justification:**
+  - **AES vs. DES:** AES-256 provides a $2^{256}$ keyspace (infeasible to brute-force) compared to DES's broken 56-bit keyspace.
   - **Authenticated Encryption (AEAD):** AES-256-GCM provides both confidentiality and built-in authenticity via a 128-bit authentication tag. Any unauthorized modification (such as flipping a single bit in the ciphertext) immediately triggers an authentication failure (`OperationError`) in the Web Crypto API, halting decryption before corrupted plaintext can reach the application.
-  - **Envelope Key Wrapping Efficiency:** Sharing a 100 MB file with 10 users requires encrypting the 100 MB payload only once. Granting access requires encrypting only a 32-byte DEK into a 256-byte wrapped token, minimizing bandwidth and cryptographic overhead.
-  - **Client-Side Key Protection:** The user's RSA private key never leaves the client endpoint in cleartext. It is encrypted in volatile memory with a PBKDF2-derived KEK before being persisted into IndexedDB/localStorage.
+  - **RSA-OAEP Key Wrapping vs. ElGamal / Diffie-Hellman:** RSA key transport allows asynchronous wrapping: an owner can share a file with an offline user simply by querying their stored public key from MongoDB. Unlike ElGamal, RSA-wrapped DEKs occupy a compact 256-byte payload without doubling file size.
+  - **SHA-512 Digest:** Generates a 512-bit cryptographic hash of the plaintext before encryption, verified on decryption to detect any potential transmission corruption.
 
 ### 2.4 Relevant Information Security Concepts
 - **Kerckhoffs's Principle:** Security relies solely on the secrecy of the keys, not the obscurity of the algorithm.
@@ -119,7 +126,7 @@ How to protect confidential document payloads against unauthorized disclosure, b
 
 ### 2.5 Limitations, Risks, and Trade-offs
 - **Limitation:** Inability for system administrators to recover lost files if a user forgets their password and misplaces their local private key backup.
-- **Trade-off:** High iteration count for PBKDF2 (600,000 rounds) creates an intentional 200–400ms computational delay during login to deter offline brute-force cracking.
+- **Trade-off:** High iteration count for PBKDF2 with SHA-512 (600,000 rounds) creates an intentional computational delay during login to deter offline brute-force cracking.
 - **Risk:** Cross-Site Scripting (XSS) in the browser application could potentially intercept decrypted keys residing temporarily in volatile memory.
 
 ---
@@ -144,7 +151,7 @@ How to verify user identities, protect against credential stuffing, prevent sess
 ### 3.3 Selected Approach and Justification
 **Selected:** Alternative 3.3 — Hybrid RBAC + DAC with Argon2id and Strict Cookie Sessions.
 - **Justification:**
-  - **Argon2id Memory Hardness:** Standard SHA-256 and MD5 password hashes can be calculated billions of times per second on commodity GPUs. Argon2id requires 64 MB of RAM and multi-threaded computation per hash, rendering parallel GPU and ASIC dictionary attacks mathematically impractical.
+  - **Argon2id Memory Hardness:** Standard password hashes can be calculated billions of times per second on commodity GPUs. Argon2id requires 64 MB of RAM and multi-threaded computation per hash, rendering parallel GPU and ASIC dictionary attacks mathematically impractical.
   - **Elimination of IDOR:** Every request to `/api/documents/:id/*` is intercepted by the Policy Enforcement Point (PEP). The PEP checks whether `req.user.id === doc.ownerId` OR whether `doc.wrappedDEKs` contains an unexpired entry for `req.user.id`. Changing the document ID in the URL parameter fails immediately with HTTP 403 Forbidden.
   - **Cookie Security:** Delivering JWTs in `HttpOnly` cookies ensures client-side JavaScript (`document.cookie`) cannot read or exfiltrate the token, neutralizing XSS credential theft. `SameSite=Strict` mitigates Cross-Site Request Forgery (CSRF).
 
@@ -162,17 +169,17 @@ How to verify user identities, protect against credential stuffing, prevent sess
 ## Decision Record 4: Document Sharing and Permission Revocation
 
 ### 4.1 The Problem Being Addressed
-How to securely share a document with specific authorized recipients without exposing the cleartext to the server, and how to revoke access such that revoked users can neither download future updates nor decrypt previously downloaded offline copies.
+How to securely share a document with specific authorized recipients without exposing cleartext to the server, and how to revoke access such that revoked users can neither download future updates nor decrypt previously downloaded offline copies.
 
 ### 4.2 Alternatives Considered
 1. **Alternative 4.1: Public or Unlisted Signed URLs (e.g., S3 Pre-signed Links)**
    - *Description:* Generating temporary download URLs with access tokens embedded in the query string.
    - *Deficiencies:* Signed URLs can be leaked in browser histories, proxy logs, or forwarded via chat/email. They cannot be revoked selectively without invalidating the signing key.
-2. **Alternative 4.2: Server-Proxied Password-Protected Sharing**
-   - *Description:* Owner sets a password, which the recipient enters to have the server decrypt and re-encrypt the file.
-   - *Deficiencies:* Violates Zero-Trust principles by forcing the server to inspect cleartext. Shared passwords are prone to being sent over insecure out-of-band channels.
-3. **Alternative 4.3: Asymmetric Key Wrapping with Dual-Mode Revocation (Selected)**
-   - *Description:* To share a document, the owner's client fetches the recipient's RSA public key, decrypts the document's DEK in local volatile memory using the owner's private key, wraps the DEK with the recipient's public key, and sends the resulting 256-byte `wrappedDEK` to be appended to the document's ACL in the database. Revocation provides two distinct tiers:
+2. **Alternative 4.2: Dynamic Diffie-Hellman Key Exchange per Session**
+   - *Description:* Requiring the document owner to be online to complete a Diffie-Hellman key agreement with the recipient whenever access is requested.
+   - *Deficiencies:* Impossible for asynchronous workflows where the recipient accesses documents while the owner is offline.
+3. **Alternative 4.3: Asymmetric Key Wrapping (RSA-OAEP) with Dual-Mode Revocation (Selected)**
+   - *Description:* To share a document, the owner's client fetches the recipient's RSA public key, decrypts the document's DEK in local volatile memory using the owner's private key, wraps the DEK with the recipient's public key, and sends the resulting 256-byte `wrappedDEK` to be appended to the document's ACL in MongoDB. Revocation provides two distinct tiers:
      - **Standard Server-Side Revocation:** The server removes the recipient's entry from the document's ACL, immediately blocking all future API download requests.
      - **Cryptographic Revocation (Enhanced):** The owner downloads the file, decrypts it locally, generates a brand new DEK and IV, re-encrypts the file, re-wraps the new DEK only for remaining authorized recipients, and overwrites the vault ciphertext and ACL.
 
@@ -209,15 +216,15 @@ Audit logs represent the primary mechanism for forensic investigations and breac
 2. **Alternative 5.2: Standard Mutable Database Collection**
    - *Description:* Inserting JSON log records into a database collection (`audit_logs`) without cryptographic integrity links.
    - *Deficiencies:* Administrators with database access can execute `db.audit_logs.updateOne({ ... })` or `deleteOne({ ... })` without leaving a cryptographic trace.
-3. **Alternative 5.3: Cryptographic SHA-256 Hash-Chained Append-Only Ledger (Selected)**
-   - *Description:* Every security event is formatted as an immutable block cryptographically bound to the previous block via a SHA-256 hash pointer:
-     $$\text{CurrHash} = \text{SHA256}(\text{PrevHash} \parallel \text{Timestamp} \parallel \text{ActorId} \parallel \text{Action} \parallel \text{TargetDocId} \parallel \text{Outcome})$$
-     The ledger begins with a deterministic Genesis Block (`prevHash: 000...000`). An automated integrity verification routine recalculates the chain from index $0$ to $N$. If any historical record is altered, inserted, or deleted, the mathematical hash link breaks at that exact block index.
+3. **Alternative 5.3: Cryptographic SHA-512 Hash-Chained Append-Only Ledger (Selected)**
+   - *Description:* Every security event is formatted as an immutable block cryptographically bound to the previous block via a 512-bit SHA-512 hash pointer:
+     $$\text{CurrHash} = \text{SHA512}(\text{PrevHash} \parallel \text{Timestamp} \parallel \text{ActorId} \parallel \text{Action} \parallel \text{TargetDocId} \parallel \text{Outcome})$$
+     The ledger begins with a deterministic Genesis Block (`prevHash: 000...000` with 128 hex digits). An automated integrity verification routine recalculates the chain from index $0$ to $N$. If any historical record is altered, inserted, or deleted, the mathematical hash link breaks at that exact block index.
 
 ### 5.3 Selected Approach and Justification
-**Selected:** Alternative 5.3 — Cryptographic SHA-256 Hash-Chained Append-Only Ledger.
+**Selected:** Alternative 5.3 — Cryptographic SHA-512 Hash-Chained Append-Only Ledger.
 - **Justification:**
-  - **Mathematical Proof of Integrity:** Any alteration of an existing record changes its calculated SHA-256 digest, which immediately creates a mismatch with the `prevHash` of the subsequent block.
+  - **Mathematical Proof of Integrity:** SHA-512 produces a 512-bit digest offering 256 bits of collision resistance against quantum and classical collision searches. Any alteration of an existing record alters its SHA-512 digest, which immediately creates a mismatch with the `prevHash` of the subsequent block.
   - **Tamper-Evident History:** An investigator or administrator can verify thousands of log records in milliseconds by verifying the hash chain.
   - **Comprehensive Operational Visibility:** The system logs both successful actions and failure states (`USER_LOGIN`, `DOCUMENT_UPLOAD`, `DOCUMENT_DOWNLOAD`, `PERMISSION_REVOKED`, `UNAUTHORIZED_ACCESS_ATTEMPT`, `PRIVILEGE_MISUSE_BLOCKED`).
 
@@ -232,15 +239,16 @@ Audit logs represent the primary mechanism for forensic investigations and breac
 
 ---
 
-## Summary Matrix of Major Architectural Decisions
+## Comparison Matrix: Curriculum Studied Algorithms in Vaultora
 
-| # | Decision Area | Selected Mechanism | Key Security Justification | Primary Trade-off |
-|---|---------------|--------------------|----------------------------|-------------------|
-| **1** | **Document Storage** | Separated `/vault/<uuid>.enc` Blob Vault + Metadata DB | Minimizes blast radius; renders drive dumps useless (high entropy) | No server-side cleartext full-text indexing |
-| **2** | **Cryptographic Protection** | Client-Side Envelope Encryption (AES-256-GCM + RSA-OAEP-2048) | AEAD prevents tampering; zero-knowledge server; lightweight sharing | Lost passwords/keys cannot be recovered by admins |
-| **3** | **Auth & Access Control** | Argon2id + HttpOnly JWT + Hybrid RBAC/DAC | Resists GPU/ASIC brute forcing; eliminates IDOR via server-side PEP | Per-request ACL evaluation in database |
-| **4** | **Sharing & Revocation** | Public Key DEK Wrapping + Dual-Tier Revocation | Instant server-side cutoff; cryptographic re-encryption prevents offline leaks | Cryptographic revocation requires client re-upload |
-| **5** | **Auditing & Accountability**| SHA-256 Hash-Chained Append-Only Ledger | Mathematical tamper evidence; non-repudiation; detection of DB modification | Requires WORM storage to prevent total database drops |
+| Algorithm | Type | Course Classification | Role in Vaultora Architecture | Technical Justification |
+| :--- | :--- | :--- | :--- | :--- |
+| **AES** | Symmetric Cipher | Modern Block Cipher | **Payload Encryption (AES-256-GCM)** | Hardware-accelerated (AES-NI), AEAD integrity tag, 256-bit key space. |
+| **DES** | Symmetric Cipher | Legacy Block Cipher | **Evaluated & Rejected in DDR** | Deprecated: 56-bit key broken by brute force; 64-bit block prone to collisions. |
+| **SHA-512** | Hash Function | Cryptographic Hash | **Integrity & Hash-Chained Audit Ledger** | 512-bit output; verifies cleartext integrity and chains audit blocks cryptographically. |
+| **Diffie-Hellman** | Key Agreement | Public-Key Protocol | **Evaluated in DDR & Key Engine** | Discrete Logarithm based; evaluated for synchronous ephemeral session keys. |
+| **ElGamal** | Asymmetric Cipher | Public-Key Cryptosystem | **Evaluated & Contrasted in DDR** | Discrete Logarithm based; rejected for bulk key wrapping due to $2\times$ ciphertext expansion. |
+| **RSA** | Asymmetric Cipher | Public-Key Cryptosystem | **Key Wrapping (RSA-OAEP-2048)** | Integer Factorization based; enables asynchronous multi-recipient DEK wrapping. |
 
 ---
 *End of Design Decision Record (CS3002 — FAST-NUCES)*

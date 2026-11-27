@@ -239,13 +239,15 @@ app.post('/api/documents/upload', pep.authenticate, upload.single('file'), async
       fileType,
       iv,
       authTag,
+      sha512,
       sha256,
       wrappedDEK
     } = req.body;
 
-    if (!originalName || !iv || !authTag || !sha256 || !wrappedDEK) {
+    const fileChecksum = sha512 || sha256;
+    if (!originalName || !iv || !authTag || !fileChecksum || !wrappedDEK) {
       return res.status(400).json({
-        error: 'Missing required cryptographic envelope fields (iv, authTag, sha256, wrappedDEK).'
+        error: 'Missing required cryptographic envelope fields (iv, authTag, sha512, wrappedDEK).'
       });
     }
 
@@ -263,7 +265,8 @@ app.post('/api/documents/upload', pep.authenticate, upload.single('file'), async
       ownerName: req.user.fullName,
       iv,
       authTag,
-      sha256,
+      sha512: fileChecksum,
+      sha256: fileChecksum,
       storagePath: `/vault/${docId}.enc`,
       wrappedDEKs: [
         {
@@ -290,7 +293,7 @@ app.post('/api/documents/upload', pep.authenticate, upload.single('file'), async
       details: {
         sizeBytes: savedDoc.size,
         blobPath: savedDoc.storagePath,
-        sha256Checksum: savedDoc.sha256
+        sha512Checksum: savedDoc.sha512 || savedDoc.sha256
       }
     });
 
@@ -367,7 +370,8 @@ app.get('/api/documents/:id/metadata', pep.authenticate, pep.enforceDocAccess('r
       ownerName: doc.ownerName,
       iv: doc.iv,
       authTag: doc.authTag,
-      sha256: doc.sha256,
+      sha512: doc.sha512 || doc.sha256,
+      sha256: doc.sha512 || doc.sha256,
       userWrappedDEK: userAcl ? userAcl.wrappedKey : null,
       permission: req.docPermission,
       sharedUsers: doc.wrappedDEKs
@@ -407,7 +411,8 @@ app.get('/api/documents/:id/download', pep.authenticate, pep.enforceDocAccess('r
   res.setHeader('Content-Disposition', `attachment; filename="${doc.id}.enc"`);
   res.setHeader('X-IV', doc.iv);
   res.setHeader('X-Auth-Tag', doc.authTag);
-  res.setHeader('X-SHA256', doc.sha256);
+  res.setHeader('X-SHA512', doc.sha512 || doc.sha256 || '');
+  res.setHeader('X-SHA256', doc.sha512 || doc.sha256 || '');
   res.setHeader('X-Wrapped-DEK', userAcl ? userAcl.wrappedKey : '');
   res.setHeader('X-Original-Name', encodeURIComponent(doc.originalName));
   res.setHeader('X-Original-Type', doc.fileType);
