@@ -1270,18 +1270,7 @@ export default function App() {
       <div className="flex-1 flex flex-col overflow-y-auto">
         {/* Top Navbar */}
         <header className="h-16 bg-white border-b border-slate-200/80 px-8 flex items-center justify-between shrink-0">
-          {/* Search Bar */}
-          <div className="relative w-96">
-            <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
-            <input
-              type="text"
-              placeholder="Search your secure documents..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              className="w-full bg-slate-50 hover:bg-slate-100/70 focus:bg-white text-sm pl-10 pr-4 py-2 rounded-xl border border-slate-200 focus:outline-none focus:ring-2 focus:ring-blue-500/20 focus:border-blue-500 transition-all text-slate-700"
-            />
-          </div>
-
+          
           {/* User Profile & Actions */}
           <div className="flex items-center gap-4">
             <button
