@@ -4,7 +4,7 @@ const cors = require('cors');
 const cookieParser = require('cookie-parser');
 const multer = require('multer');
 const path = require('path');
-const { v4: uuidv4 } = require('uuid');
+const { randomUUID: uuidv4 } = require('crypto');
 
 const db = require('./database');
 const auditChain = require('./auditChain');
@@ -76,6 +76,15 @@ async function ensureInitialized() {
   }
   return initPromise;
 }
+
+app.get('/api/health', (req, res) => {
+  res.json({
+    ok: true,
+    vercel: Boolean(process.env.VERCEL),
+    hasMongoUri: Boolean(process.env.MONGODB_URI),
+    dbConnected: db.isUsingMongoose()
+  });
+});
 
 app.use('/api', async (req, res, next) => {
   try {

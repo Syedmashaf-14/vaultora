@@ -7,7 +7,7 @@ const auditChain = require('./auditChain');
 async function seedDefaultUsers() {
   try {
     await db.connect();
-    const hash = await pep.hashPassword('Password123!');
+    let hash = null;
 
     const demoUsers = [
       {
@@ -36,6 +36,9 @@ async function seedDefaultUsers() {
     for (const u of demoUsers) {
       const existing = await db.findUserByUsername(u.username);
       if (!existing) {
+        if (!hash) {
+          hash = await pep.hashPassword('Password123!');
+        }
         const { publicKey } = crypto.generateKeyPairSync('rsa', {
           modulusLength: 2048,
           publicKeyEncoding: { type: 'spki', format: 'pem' }

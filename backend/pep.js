@@ -1,23 +1,51 @@
-const argon2 = require('argon2');
+const crypto = require('crypto');
 const jwt = require('jsonwebtoken');
 const db = require('./database');
 const auditChain = require('./auditChain');
 
+let argon2 = null;
+try {
+  argon2 = require('argon2');
+} catch (err) {
+  console.warn('argon2 native module unavailable, falling back to scrypt:', err.message);
+}
+
 const JWT_SECRET = process.env.JWT_SECRET || 'vaultora_cryptographic_jwt_hmac_secret_2026_fast';
 
-const pep = {
-  // Argon2id Password Hashing
-  async hashPassword(plaintext) {
-    return await argon2.hash(plaintext, {
-      type: argon2.argon2id,
-      memoryCost: 65536, // 64 MB
-      timeCost: 3,       // 3 iterations
-      parallelism: 4     // 4 threads
+function scryptAsync(password, salt) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(password, salt, 64, { N: 16384, r: 8, p: 1 }, (err, derivedKey) => {
+      if (err) reject(err);
+      else resolve(derivedKey.toString('hex'));
     });
+  });
+}
+
+const pep = {
+  // Argon2id Password Hashing (with scrypt fallback if native addon is unavailable)
+  async hashPassword(plaintext) {
+    if (argon2) {
+      return await argon2.hash(plaintext, {
+        type: argon2.argon2id,
+        memoryCost: 65536, // 64 MB
+        timeCost: 3,       // 3 iterations
+        parallelism: 4     // 4 threads
+      });
+    }
+    const salt = crypto.randomBytes(16).toString('hex');
+    const derived = await scryptAsync(plaintext, salt);
+    return `scrypt$${salt}$${derived}`;
   },
 
   async verifyPassword(hash, plaintext) {
     try {
+      if (typeof hash === 'string' && hash.startsWith('scrypt$')) {
+        const [, salt, expected] = hash.split('$');
+        if (!salt || !expected) return false;
+        const derived = await scryptAsync(plaintext, salt);
+        return crypto.timingSafeEqual(Buffer.from(derived, 'hex'), Buffer.from(expected, 'hex'));
+      }
+      if (!argon2) return false;
       return await argon2.verify(hash, plaintext);
     } catch {
       return false;
