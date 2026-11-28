@@ -174,7 +174,7 @@ export default function App() {
     const trimmedEmail = email.trim();
     const trimmedUsername = username.trim();
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    const emailRegex = /^[a-zA-Z0-9](?:[a-zA-Z0-9._%+-]*[a-zA-Z0-9])?@(?:[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$/;
     const usernameRegex = /^[a-zA-Z0-9_]{3,24}$/;
 
     if (!trimmedUsername || !trimmedFullName || !trimmedEmail || !password) {
@@ -187,8 +187,8 @@ export default function App() {
       return;
     }
 
-    if (!emailRegex.test(trimmedEmail)) {
-      setAuthError('Please enter a valid email address (e.g., name@domain.com).');
+    if (trimmedEmail.includes('..') || !emailRegex.test(trimmedEmail)) {
+      setAuthError('Please enter a valid email address (e.g., name@gmail.com).');
       return;
     }
 

@@ -122,15 +122,15 @@ app.post('/api/auth/register', async (req, res) => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanFullName = typeof fullName === 'string' && fullName.trim() ? fullName.trim() : cleanUsername;
 
-    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    const emailRegex = /^[a-zA-Z0-9](?:[a-zA-Z0-9._%+-]*[a-zA-Z0-9])?@(?:[a-zA-Z0-9-]*[a-zA-Z][a-zA-Z0-9-]*\.)+[a-zA-Z]{2,}$/;
     const usernameRegex = /^[a-z0-9_]{3,24}$/;
 
     if (cleanFullName.length < 2 || cleanFullName.length > 60) {
       return res.status(400).json({ error: 'Full name must be between 2 and 60 characters.' });
     }
 
-    if (!emailRegex.test(cleanEmail)) {
-      return res.status(400).json({ error: 'Invalid email address format.' });
+    if (cleanEmail.includes('..') || !emailRegex.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Please enter a valid email address (e.g., name@gmail.com).' });
     }
 
     if (!usernameRegex.test(cleanUsername)) {
