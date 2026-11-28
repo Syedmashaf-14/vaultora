@@ -103,17 +103,53 @@ app.use('/api', async (req, res, next) => {
 // Register User
 app.post('/api/auth/register', async (req, res) => {
   try {
-    const { username, email, fullName, password, publicKeyPem, role = 'user' } = req.body;
+    const { username, email, fullName, password, publicKeyPem, role = 'user' } = req.body || {};
 
-    if (!username || !email || !password || !publicKeyPem) {
+    if (
+      typeof username !== 'string' ||
+      typeof email !== 'string' ||
+      typeof password !== 'string' ||
+      typeof publicKeyPem !== 'string' ||
+      !username.trim() ||
+      !email.trim() ||
+      !password ||
+      !publicKeyPem.trim()
+    ) {
       return res.status(400).json({ error: 'Username, email, password, and RSA public key are required.' });
     }
 
-    const existingUser = await db.findUserByUsername(username);
+    const cleanUsername = username.trim().toLowerCase();
+    const cleanEmail = email.trim().toLowerCase();
+    const cleanFullName = typeof fullName === 'string' && fullName.trim() ? fullName.trim() : cleanUsername;
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    const usernameRegex = /^[a-z0-9_]{3,24}$/;
+
+    if (cleanFullName.length < 2 || cleanFullName.length > 60) {
+      return res.status(400).json({ error: 'Full name must be between 2 and 60 characters.' });
+    }
+
+    if (!emailRegex.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Invalid email address format.' });
+    }
+
+    if (!usernameRegex.test(cleanUsername)) {
+      return res.status(400).json({ error: 'Username must be 3-24 characters (letters, numbers, underscores only).' });
+    }
+
+    if (password.length < 8 || !/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters and include a letter and a number.' });
+    }
+
+    if (!publicKeyPem.includes('BEGIN PUBLIC KEY')) {
+      return res.status(400).json({ error: 'Invalid RSA public key format.' });
+    }
+
+    const existingUser = await db.findUserByUsername(cleanUsername);
     if (existingUser) {
       return res.status(409).json({ error: 'Username is already registered.' });
     }
-    const existingEmail = await db.findUserByEmail(email);
+    const existingEmail = await db.findUserByEmail(cleanEmail);
     if (existingEmail) {
       return res.status(409).json({ error: 'Email address is already in use.' });
     }
@@ -123,9 +159,9 @@ app.post('/api/auth/register', async (req, res) => {
 
     const newUser = {
       id: userId,
-      username: username.toLowerCase().trim(),
-      email: email.toLowerCase().trim(),
-      fullName: fullName || username,
+      username: cleanUsername,
+      email: cleanEmail,
+      fullName: cleanFullName,
       role: ['admin', 'auditor', 'user'].includes(role) ? role : 'user',
       argon2Hash,
       publicKeyPem,
@@ -168,7 +204,6 @@ app.post('/api/auth/register', async (req, res) => {
     res.status(500).json({ error: 'Registration failed.', details: err.message });
   }
 });
-
 // Login
 app.post('/api/auth/login', async (req, res) => {
   try {
