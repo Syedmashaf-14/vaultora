@@ -1,7 +1,9 @@
 # Vaultora — Zero-Trust Secure Document Management System
 **CS3002 Information Security — Semester Project**  
 **National University of Computer & Emerging Sciences (FAST-NUCES)**  
-**Author:** Syed Muhammad Mashaf Zaidi (Roll No: 23F-0529)  
+**Author:** Syed Mashaf Zaidi (Roll No: 23F-0529)  
+**Author:** Ahmed Waseem (Roll No: 23F-0536)  
+**Author:** Taimoor Ahmed (Roll No: 23F-0551)  
 
 ---
 
