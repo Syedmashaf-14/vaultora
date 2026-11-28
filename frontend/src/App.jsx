@@ -164,14 +164,46 @@ export default function App() {
     }
   };
 
-  // 1. Sign Up Handler (Generates RSA Keypair + PBKDF2 KEK -> MongoDB)
+    // 1. Sign Up Handler (Generates RSA Keypair + PBKDF2 KEK -> MongoDB)
   const handleRegister = async (e) => {
     e.preventDefault();
     setAuthError('');
     const { username, fullName, email, password, role } = authForm;
 
-    if (!username || !fullName || !email || !password) {
+    const trimmedFullName = fullName.trim();
+    const trimmedEmail = email.trim();
+    const trimmedUsername = username.trim();
+
+    const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
+    const usernameRegex = /^[a-zA-Z0-9_]{3,24}$/;
+
+    if (!trimmedUsername || !trimmedFullName || !trimmedEmail || !password) {
       setAuthError('Please fill in all required fields.');
+      return;
+    }
+
+    if (trimmedFullName.length < 2 || trimmedFullName.length > 60) {
+      setAuthError('Full name must be between 2 and 60 characters.');
+      return;
+    }
+
+    if (!emailRegex.test(trimmedEmail)) {
+      setAuthError('Please enter a valid email address (e.g., name@domain.com).');
+      return;
+    }
+
+    if (!usernameRegex.test(trimmedUsername)) {
+      setAuthError('Username must be 3-24 characters and contain only letters, numbers, or underscores.');
+      return;
+    }
+
+    if (password.length < 8) {
+      setAuthError('Password must be at least 8 characters long.');
+      return;
+    }
+
+    if (!/[A-Za-z]/.test(password) || !/[0-9]/.test(password)) {
+      setAuthError('Password must include at least one letter and one number.');
       return;
     }
 
@@ -181,7 +213,7 @@ export default function App() {
 
       setCryptoStatus('2/3: Deriving PBKDF2 KEK (600,000 iterations) to protect private key...');
       // Key will be stored using user.id once assigned by backend
-      const tempId = `reg_${username.toLowerCase()}`;
+      const tempId = `reg_${trimmedUsername.toLowerCase()}`;
       await encryptAndStorePrivateKey(keyPair.privateKey, password, tempId);
 
       setCryptoStatus('3/3: Storing profile & Argon2id hash in MongoDB Cluster...');
@@ -189,9 +221,9 @@ export default function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          username,
-          fullName,
-          email,
+          username: trimmedUsername,
+          fullName: trimmedFullName,
+          email: trimmedEmail,
           password,
           role,
           publicKeyPem: keyPair.publicKeyPem
@@ -219,7 +251,6 @@ export default function App() {
       setCryptoStatus('');
     }
   };
-
   // 2. Sign In Handler (Argon2id verification via MongoDB + Unlock Local RSA Private Key)
   const handleLogin = async (e) => {
     e.preventDefault();
